@@ -65,6 +65,9 @@ public:
         setIfPresent(kv, "numCellsY",        cfg.numCellsY);
         setIfPresent(kv, "numCellsZ",        cfg.numCellsZ);
         setIfPresent(kv, "baseUnit",         cfg.baseUnit);
+        setIfPresent(kv, "domainLengthX",    cfg.domainLengthX);
+        setIfPresent(kv, "domainLengthY",    cfg.domainLengthY);
+        setIfPresent(kv, "domainLengthZ",    cfg.domainLengthZ);
         setIfPresent(kv, "reynoldsNumber",   cfg.reynoldsNumber);
         setIfPresent(kv, "hyperViscousRe",   cfg.hyperViscousRe);
         setIfPresent(kv, "hyperViscousStart",cfg.hyperViscousStart);
@@ -83,10 +86,10 @@ public:
         if (kv.count("initialProfile")) cfg.initialProfile   = parseProfile(kv["initialProfile"]);
         if (kv.count("flowType"))       cfg.flowType         = parseFlow(kv["flowType"]);
 
-        // Auto-compute cell sizes if not specified
-        if (cfg.cellSizeX == 0.0) cfg.cellSizeX = 1.0 / cfg.numCellsX;
-        if (cfg.cellSizeY == 0.0) cfg.cellSizeY = 1.0 / cfg.numCellsY;
-        if (cfg.cellSizeZ == 0.0) cfg.cellSizeZ = 1.0 / cfg.numCellsZ;
+        // Cell sizes: dx = Cmp/II, dy = Alt/JJ, dz = Lrg/KK  (matches NavSto_dynamic.cpp)
+        if (cfg.cellSizeX == 0.0) cfg.cellSizeX = cfg.domainLengthX / cfg.numCellsX;
+        if (cfg.cellSizeY == 0.0) cfg.cellSizeY = cfg.domainLengthY / cfg.numCellsY;
+        if (cfg.cellSizeZ == 0.0) cfg.cellSizeZ = cfg.domainLengthZ / cfg.numCellsZ;
 
         LOG_INFO("Config loaded from ", path.string());
     }
@@ -100,6 +103,9 @@ public:
         f << "numCellsY        = " << cfg.numCellsY        << '\n';
         f << "numCellsZ        = " << cfg.numCellsZ        << '\n';
         f << "baseUnit         = " << cfg.baseUnit         << '\n';
+        f << "domainLengthX    = " << cfg.domainLengthX    << '\n';
+        f << "domainLengthY    = " << cfg.domainLengthY    << '\n';
+        f << "domainLengthZ    = " << cfg.domainLengthZ    << '\n';
         f << "reynoldsNumber   = " << cfg.reynoldsNumber   << '\n';
         f << "hyperViscousRe   = " << cfg.hyperViscousRe   << '\n';
         f << "maxTimeSteps     = " << cfg.maxTimeSteps     << '\n';

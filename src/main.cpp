@@ -203,9 +203,10 @@ int main(int argc, char* argv[])
     } else {
         LOG_INFO("No config file given — using built-in defaults.");
         // Defaults are already set in SimConfig's inline initialisers.
-        s.cfg.cellSizeX = 1.0 / s.cfg.numCellsX;
-        s.cfg.cellSizeY = 1.0 / s.cfg.numCellsY;
-        s.cfg.cellSizeZ = 1.0 / s.cfg.numCellsZ;
+        // Cell sizes: dx = Cmp/II, dy = Alt/JJ, dz = Lrg/KK
+        s.cfg.cellSizeX = s.cfg.domainLengthX / s.cfg.numCellsX;
+        s.cfg.cellSizeY = s.cfg.domainLengthY / s.cfg.numCellsY;
+        s.cfg.cellSizeZ = s.cfg.domainLengthZ / s.cfg.numCellsZ;
     }
 
     // ── Create output directory ───────────────────────────────────────────────
@@ -219,6 +220,8 @@ int main(int argc, char* argv[])
     // ── Allocate memory & initialise ─────────────────────────────────────────
     LOG_INFO("Grid: ", s.cfg.numCellsX, " x ", s.cfg.numCellsY, " x ", s.cfg.numCellsZ,
              "  Re=", s.cfg.reynoldsNumber);
+    LOG_INFO("Domain: ", s.cfg.domainLengthX, " x ", s.cfg.domainLengthY, " x ", s.cfg.domainLengthZ,
+             "  dx=", s.cfg.cellSizeX, "  dy=", s.cfg.cellSizeY, "  dz=", s.cfg.cellSizeZ);
 
     s.allocateFields();
 

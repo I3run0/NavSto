@@ -34,37 +34,42 @@ enum class FlowType       { SteadyMarching, RK4Transient };
 // ---------------------------------------------------------------------------
 struct SimConfig {
     // Grid
-    int numCellsX  = 48;
-    int numCellsY  = 24;
-    int numCellsZ  = 24;
-    int baseUnit   = 12;
+    int numCellsX  = 240;   // II = 6*NN, NN=40
+    int numCellsY  = 80;    // JJ = 2*NN
+    int numCellsZ  = 40;    // KK = NN
+    int baseUnit   = 40;    // NN
 
-    // Cell sizes (set automatically if left 0)
-    double cellSizeX = 0.0;
-    double cellSizeY = 0.0;
-    double cellSizeZ = 0.0;
+    // Physical domain dimensions (Cmp x Alt x Lrg in original)
+    double domainLengthX = 6.0;   // Cmp
+    double domainLengthY = 2.0;   // Alt
+    double domainLengthZ = 1.0;   // Lrg
+
+    // Cell sizes — derived from domain/grid; set automatically if left 0
+    double cellSizeX = 0.0;   // dx = domainLengthX / numCellsX
+    double cellSizeY = 0.0;   // dy = domainLengthY / numCellsY
+    double cellSizeZ = 0.0;   // dz = domainLengthZ / numCellsZ
 
     // Physics
-    double reynoldsNumber  = 100.0;
-    double hyperViscousRe  = 1.0;
+    double reynoldsNumber  = 9600.0;
+    double hyperViscousRe  = 20.0;
     int    hyperViscousStart = 0;
 
     // Time integration
     int    maxTimeSteps    = 10000;
-    int    reportEveryN    = 500;
+    int    reportEveryN    = 1000;
     double convergenceTol  = 1e-6;
 
-    // Boundary / geometry conditions
-    GeometryType   geometryType   = GeometryType::Axial;
-    GeometryShape  geometryShape  = GeometryShape::AbruptExpansion;
-    OutletBC       outletCondition = OutletBC::ZeroFirstDeriv;
-    LateralBC      lateralCondition = LateralBC::Periodic;
-    InitialProfile initialProfile  = InitialProfile::InletProfile;
-    FlowType       flowType        = FlowType::RK4Transient;
+    // Boundary / geometry conditions  — matches NavSto_dynamic.cpp main()
+    GeometryType   geometryType    = GeometryType::Curved;           // TipoGeometria = "Crv"
+    GeometryShape  geometryShape   = GeometryShape::RoundedCorner;   // Geometria     = "Cam"
+    OutletBC       outletCondition = OutletBC::ZeroFirstDeriv;        // CondSaida     = "1d0"
+    LateralBC      lateralCondition = LateralBC::Periodic;            // CondLater     = "prd"
+    InitialProfile initialProfile   = InitialProfile::PotentialFlow;  // PerfilInicial = "LCP"
+    FlowType       flowType         = FlowType::SteadyMarching;       // itp = 0
 
     // Output
-    std::filesystem::path outputDir  = ".";
-    std::string           runName    = "navsolver_run";
+    std::filesystem::path outputDir  = "results";
+    std::string           runName    = "cam_re9600";
     int                   numPressureIter = 5;
 };
 
