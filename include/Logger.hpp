@@ -4,7 +4,7 @@
 //
 //  Writes timestamped, severity-tagged lines to both stdout and an optional
 //  log file.  Levels: DEBUG < INFO < WARN < ERROR.
-//  Call Logger::setLevel(Logger::Level::DEBUG) to enable verbose output.
+//  Call Logger::setLevel(Logger::Level::DBUG) to enable verbose output.
 // =============================================================================
 
 #include <iostream>
@@ -17,7 +17,7 @@
 
 class Logger {
 public:
-    enum class Level { DEBUG = 0, INFO = 1, WARN = 2, ERR = 3 };
+    enum class Level { DBUG = 0, INFO = 1, WARN = 2, ERR = 3 };
 
     static Logger& instance() {
         static Logger inst;
@@ -42,7 +42,7 @@ public:
     }
 
     // Convenience helpers
-    template <typename... A> void debug(A&&... a) { log(Level::DEBUG, std::forward<A>(a)...); }
+    template <typename... A> void debug(A&&... a) { log(Level::DBUG, std::forward<A>(a)...); }
     template <typename... A> void info (A&&... a) { log(Level::INFO,  std::forward<A>(a)...); }
     template <typename... A> void warn (A&&... a) { log(Level::WARN,  std::forward<A>(a)...); }
     template <typename... A> void error(A&&... a) { log(Level::ERR,   std::forward<A>(a)...); }
@@ -69,7 +69,7 @@ private:
 
     static const char* tag(Level l) {
         switch (l) {
-            case Level::DEBUG: return "DEBUG";
+            case Level::DBUG: return "DEBUG";
             case Level::INFO:  return " INFO";
             case Level::WARN:  return " WARN";
             case Level::ERR:   return "ERROR";
