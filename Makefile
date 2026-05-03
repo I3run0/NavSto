@@ -19,8 +19,8 @@ CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -Wshadow \
             -Wno-unused-parameter
 
 # ── Directories ────────────────────────────────────────────────────────────────
-SRCDIR   := src
-INCDIR   := include
+SRCDIR   := src/serial
+INCDIR   := src/common
 BUILDDIR := build
 TARGET   := navsolver
 
