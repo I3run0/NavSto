@@ -29,8 +29,7 @@ OBJS := $(patsubst $(SRCDIR)/%.cpp, $(BUILDDIR)/%.o, $(SRCS))
 
 # ── Build profiles ─────────────────────────────────────────────────────────────
 RELEASE_FLAGS  := -O3 -DNDEBUG -march=native -funroll-loops
-DEBUG_FLAGS    := -O0 -g3 -DDEBUG -fsanitize=address,undefined \
-                  -fno-omit-frame-pointer
+DEBUG_FLAGS    := -O0 -g3 -DDEBUG -fsanitize=address -fno-omit-frame-pointer
 SANITIZE_FLAGS := -O1 -g -fsanitize=address,undefined,leak \
                   -fno-omit-frame-pointer
 

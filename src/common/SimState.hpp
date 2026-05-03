@@ -34,10 +34,10 @@ enum class FlowType       { SteadyMarching, RK4Transient };
 // ---------------------------------------------------------------------------
 struct SimConfig {
     // Grid
-    int numCellsX  = 240;   // II = 6*NN, NN=40
-    int numCellsY  = 80;    // JJ = 2*NN
-    int numCellsZ  = 40;    // KK = NN
-    int baseUnit   = 40;    // NN
+    int numCellsX  = 120;   // II = 6*NN, NN=40
+    int numCellsY  = 40;    // JJ = 2*NN
+    int numCellsZ  = 20;    // KK = NN
+    int baseUnit   = 20;    // NN
 
     // Physical domain dimensions (Cmp x Alt x Lrg in original)
     double domainLengthX = 6.0;   // Cmp
@@ -50,7 +50,7 @@ struct SimConfig {
     double cellSizeZ = 0.0;   // dz = domainLengthZ / numCellsZ
 
     // Physics
-    double reynoldsNumber  = 9600.0;
+    double reynoldsNumber  = 100.0;
     double hyperViscousRe  = 20.0;
     int    hyperViscousStart = 0;
 
