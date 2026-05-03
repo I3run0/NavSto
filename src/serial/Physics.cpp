@@ -393,83 +393,216 @@ void initSimulation(SimState& s)
 // ---------------------------------------------------------------------------
 //  computeAccelerations — UNIFAES advective + viscous accelerations
 // ---------------------------------------------------------------------------
+// =============================================================================
+//  computeAccelerations  —  UNIFAES advection + viscous terms (exact as CoCOEF)
+// =============================================================================
 void computeAccelerations(SimState& s)
 {
     const auto& cfg = s.cfg;
     const bool periodic = (cfg.lateralCondition == LateralBC::Periodic);
     const int KKfim = periodic ? cfg.numCellsZ : s.numCellsZm1;
 
+    // Zero all acceleration arrays
     s.accelX.fill(0.0);
     s.accelY.fill(0.0);
     s.accelZ.fill(0.0);
 
-    for (int i = 1; i <= s.numCellsXm1; ++i) {
-        const double localRe = 1.0 / effectiveInvRe(s, i);
+    // Temporary 1‑D arrays (logical index -1 .. maxDim) offset by +1
+    const int maxDim = std::max({cfg.numCellsX, cfg.numCellsY, cfg.numCellsZ});
+    std::vector<double> ppie(maxDim+2, 0.0), ppiw(maxDim+2, 0.0);
+    std::vector<double> ppin(maxDim+2, 0.0), ppis(maxDim+2, 0.0);
+    std::vector<double> ppiu(maxDim+2, 0.0), ppid(maxDim+2, 0.0);
+    std::vector<double> qsie(maxDim+2, 0.0), qsin(maxDim+2, 0.0), qsiu(maxDim+2, 0.0);
+    std::vector<double> Ku(maxDim+2, 0.0),    Kv(maxDim+2, 0.0),    Kw(maxDim+2, 0.0);
 
-        for (int j1 = s.jLow[i]; j1 <= s.jHigh[i]; ++j1) {
-            const int j2 = j1;
-            // ── x-direction UNIFAES ──────────────────────────────────────────
-            {
-                const int im = i - 1, ip = i + 1;
-                double uFace = 0.5 * (s.velX(i, j1, 1) + s.velX(im, j1, 1));
-                double DPe   = localRe * uFace * cfg.cellSizeX;
-                double pip, cE, cW;
-                computeExponentialWeights(localRe, DPe, pip, cE, cW);
+    // Helper to access offset arrays (logical idx -> physical idx+1)
+    auto VM = [](std::vector<double>& v, int idx) -> double& { return v[idx+1]; };
 
-                // Accumulate x-accelerations for nodes (i-1,j1) and (i,j1)
-                for (int k = 1; k <= KKfim; ++k) {
-                    uFace  = 0.5 * (s.velX(i, j1, k) + s.velX(im, j1, k));
-                    DPe    = localRe * uFace * cfg.cellSizeX;
-                    computeExponentialWeights(localRe, DPe, pip, cE, cW);
-
-                    const double qsi = computeQsi(DPe, pip, 0.5);
-                    // Upwind-biased flux from x-faces
-                    s.accelX(im, j1, k) -= (cE * (s.velX(i,  j1, k) - s.velX(im, j1, k)));
-                    s.accelX(i,  j1, k) += (cW * (s.velX(ip, j1, k) - s.velX(i,  j1, k)));
-                    s.accelY(im, j1, k) -= (cE * (s.velY(i,  j1, k) - s.velY(im, j1, k)));
-                    s.accelY(i,  j1, k) += (cW * (s.velY(ip, j1, k) - s.velY(i,  j1, k)));
-                    s.accelZ(im, j1, k) -= (cE * (s.velZ(i,  j1, k) - s.velZ(im, j1, k)));
-                    s.accelZ(i,  j1, k) += (cW * (s.velZ(ip, j1, k) - s.velZ(i,  j1, k)));
-                    (void)qsi;  // cross-term: included in y/z sweeps below
-                }
+    // ---------- Direction X ----------
+    const double invDx2 = 1.0 / (cfg.cellSizeX * cfg.cellSizeX);
+    for (int j = 1; j <= s.numCellsYm1; ++j) {
+        const int iStart = s.iLow[j];
+        const int iEnd   = s.iHigh[j];
+        for (int k = 1; k <= KKfim; ++k) {
+            // Compute face coefficients (between i and i+1)
+            for (int i = iStart; i <= iEnd-1; ++i) {
+                const double localRe = 1.0 / effectiveInvRe(s, i);
+                const double uFace = 0.5 * (s.velX(i+1, j, k) + s.velX(i, j, k));
+                const double DPe = localRe * uFace * cfg.cellSizeX;
+                double pip, cip, cim;
+                computeExponentialWeights(localRe, DPe, pip, cip, cim);
+                VM(ppie, i+1) = cip;          // east coefficient at face i+0.5
+                VM(ppiw, i+2) = cim;          // west coefficient at face i+1.5 ? Actually original uses ppiw[ip+1] = cim
+                // Correction: original code: VM(ppiw, ip+1) = cim; where ip = i+1
+                // We'll store at (i+1) for west of face i+0.5? Let's follow original exactly:
+                // They do: VM(ppie, i+1) = cip;  VM(ppiw, ip+1) = cim;  (ip = i+1)
+                // So ppiw is indexed by the right cell index.
+                VM(ppiw, i+1+1) = cim;
+                VM(qsie, i+1) = computeQsi(DPe, pip, 0.5);
             }
-
-            // ── y-direction UNIFAES ──────────────────────────────────────────
-            {
-                const int jm2 = j2 - 1, jp2 = j2 + 1;
-                for (int k = 1; k <= KKfim; ++k) {
-                    const double vFace = 0.5 * (s.velY(i, j2, k) + s.velY(i, jm2, k));
-                    const double DPe   = localRe * vFace * cfg.cellSizeY;
-                    double pip, cE, cW;
-                    computeExponentialWeights(localRe, DPe, pip, cE, cW);
-                    s.accelX(i, jm2, k) -= cE * (s.velX(i, j2,  k) - s.velX(i, jm2, k));
-                    s.accelX(i, j2,  k) += cW * (s.velX(i, jp2, k) - s.velX(i, j2,  k));
-                    s.accelY(i, jm2, k) -= cE * (s.velY(i, j2,  k) - s.velY(i, jm2, k));
-                    s.accelY(i, j2,  k) += cW * (s.velY(i, jp2, k) - s.velY(i, j2,  k));
-                    s.accelZ(i, jm2, k) -= cE * (s.velZ(i, j2,  k) - s.velZ(i, jm2, k));
-                    s.accelZ(i, j2,  k) += cW * (s.velZ(i, jp2, k) - s.velZ(i, j2,  k));
-                }
+            // Compute diffusive part of Au, Av, Aw (first part)
+            for (int i = iStart+1; i <= iEnd-1; ++i) {
+                const double coeff = invDx2;
+                s.accelX(i, j, k) += (VM(ppie,i+1)*(s.velX(i+1,j,k)-s.velX(i,j,k))
+                                     + VM(ppiw,i+1)*(s.velX(i-1,j,k)-s.velX(i,j,k))) * coeff;
+                s.accelY(i, j, k) += (VM(ppie,i+1)*(s.velY(i+1,j,k)-s.velY(i,j,k))
+                                     + VM(ppiw,i+1)*(s.velY(i-1,j,k)-s.velY(i,j,k))) * coeff;
+                s.accelZ(i, j, k) += (VM(ppie,i+1)*(s.velZ(i+1,j,k)-s.velZ(i,j,k))
+                                     + VM(ppiw,i+1)*(s.velZ(i-1,j,k)-s.velZ(i,j,k))) * coeff;
             }
-
-            // ── z-direction UNIFAES ──────────────────────────────────────────
-            for (int k = (periodic ? 1 : 1); k <= KKfim; ++k) {
-                const int km = (periodic && k == 1) ? cfg.numCellsZ : k - 1;
-                const double wFace = 0.5 * (s.velZ(i, j2, k) + s.velZ(i, j2, km));
-                const double DPe   = localRe * wFace * cfg.cellSizeZ;
-                double pip, cE, cW;
-                computeExponentialWeights(localRe, DPe, pip, cE, cW);
-                const int kp = (periodic && k == cfg.numCellsZ) ? 1 : k + 1;
-                s.accelX(i, j2, km) -= cE * (s.velX(i, j2, k)  - s.velX(i, j2, km));
-                s.accelX(i, j2, k)  += cW * (s.velX(i, j2, kp) - s.velX(i, j2, k));
-                s.accelY(i, j2, km) -= cE * (s.velY(i, j2, k)  - s.velY(i, j2, km));
-                s.accelY(i, j2, k)  += cW * (s.velY(i, j2, kp) - s.velY(i, j2, k));
-                s.accelZ(i, j2, km) -= cE * (s.velZ(i, j2, k)  - s.velZ(i, j2, km));
-                s.accelZ(i, j2, k)  += cW * (s.velZ(i, j2, kp) - s.velZ(i, j2, k));
+            // Compute cross‑term correction (K * qsi)
+            for (int i = iStart+1; i <= iEnd-1; ++i) {
+                const double localRe = 1.0 / effectiveInvRe(s, i);
+                const double uCell = s.velX(i, j, k);
+                const double DPe = localRe * uCell * cfg.cellSizeX;
+                double pip, cip, cim;
+                computeExponentialWeights(localRe, DPe, pip, cip, cim);
+                cip *= invDx2;
+                cim *= invDx2;
+                VM(Ku, i+1) = cip*(s.velX(i,j,k)-s.velX(i+1,j,k)) + cim*(s.velX(i,j,k)-s.velX(i-1,j,k));
+                VM(Kv, i+1) = cip*(s.velY(i,j,k)-s.velY(i+1,j,k)) + cim*(s.velY(i,j,k)-s.velY(i-1,j,k));
+                VM(Kw, i+1) = cip*(s.velZ(i,j,k)-s.velZ(i+1,j,k)) + cim*(s.velZ(i,j,k)-s.velZ(i-1,j,k));
+            }
+            // Extrapolate Ku,Kv,Kw at boundaries
+            VM(Ku, iStart+1) = 2.0*VM(Ku, iStart+2) - VM(Ku, iStart+3);
+            VM(Kv, iStart+1) = 2.0*VM(Kv, iStart+2) - VM(Kv, iStart+3);
+            VM(Kw, iStart+1) = 2.0*VM(Kw, iStart+2) - VM(Kw, iStart+3);
+            VM(Ku, iEnd+1)   = 2.0*VM(Ku, iEnd)   - VM(Ku, iEnd-1);
+            VM(Kv, iEnd+1)   = 2.0*VM(Kv, iEnd)   - VM(Kv, iEnd-1);
+            VM(Kw, iEnd+1)   = 2.0*VM(Kw, iEnd)   - VM(Kw, iEnd-1);
+            // Average to faces
+            for (int i = iStart; i <= iEnd-1; ++i) {
+                VM(Ku, i+1) = 0.5*(VM(Ku, i+1) + VM(Ku, i+2));
+                VM(Kv, i+1) = 0.5*(VM(Kv, i+1) + VM(Kv, i+2));
+                VM(Kw, i+1) = 0.5*(VM(Kw, i+1) + VM(Kw, i+2));
+            }
+            // Subtract cross‑term divergence
+            for (int i = iStart+1; i <= iEnd-1; ++i) {
+                s.accelX(i, j, k) -= (VM(Ku,i+1)*VM(qsie,i+1) - VM(Ku,i)*VM(qsie,i));
+                s.accelY(i, j, k) -= (VM(Kv,i+1)*VM(qsie,i+1) - VM(Kv,i)*VM(qsie,i));
+                s.accelZ(i, j, k) -= (VM(Kw,i+1)*VM(qsie,i+1) - VM(Kw,i)*VM(qsie,i));
             }
         }
     }
 
-    // Periodic BC in z: copy KK → 0
+    // ---------- Direction Y ----------
+    const double invDy2 = 1.0 / (cfg.cellSizeY * cfg.cellSizeY);
+    for (int i = 1; i <= s.numCellsXm1; ++i) {
+        const int jStart = s.jLow[i];
+        const int jEnd   = s.jHigh[i];
+        const double invRe = effectiveInvRe(s, i);
+        const double localRe = 1.0 / invRe;
+        for (int k = 1; k <= KKfim; ++k) {
+            for (int j = jStart; j <= jEnd-1; ++j) {
+                const double vFace = 0.5 * (s.velY(i, j+1, k) + s.velY(i, j, k));
+                const double DPe = localRe * vFace * cfg.cellSizeY;
+                double pip, cin, cis;
+                computeExponentialWeights(localRe, DPe, pip, cin, cis);
+                VM(ppin, j+1) = cin;
+                VM(ppis, j+2) = cis;
+                VM(qsin, j+1) = computeQsi(DPe, pip, 0.5);
+            }
+            for (int j = jStart+1; j <= jEnd-1; ++j) {
+                const double coeff = invDy2;
+                s.accelX(i, j, k) += (VM(ppin,j+1)*(s.velX(i,j+1,k)-s.velX(i,j,k))
+                                     + VM(ppis,j+1)*(s.velX(i,j-1,k)-s.velX(i,j,k))) * coeff;
+                s.accelY(i, j, k) += (VM(ppin,j+1)*(s.velY(i,j+1,k)-s.velY(i,j,k))
+                                     + VM(ppis,j+1)*(s.velY(i,j-1,k)-s.velY(i,j,k))) * coeff;
+                s.accelZ(i, j, k) += (VM(ppin,j+1)*(s.velZ(i,j+1,k)-s.velZ(i,j,k))
+                                     + VM(ppis,j+1)*(s.velZ(i,j-1,k)-s.velZ(i,j,k))) * coeff;
+            }
+            for (int j = jStart+1; j <= jEnd-1; ++j) {
+                const double vCell = s.velY(i, j, k);
+                const double DPe = localRe * vCell * cfg.cellSizeY;
+                double pip, cin, cis;
+                computeExponentialWeights(localRe, DPe, pip, cin, cis);
+                cin *= invDy2;  cis *= invDy2;
+                VM(Ku, j+1) = cin*(s.velX(i,j,k)-s.velX(i,j+1,k)) + cis*(s.velX(i,j,k)-s.velX(i,j-1,k));
+                VM(Kv, j+1) = cin*(s.velY(i,j,k)-s.velY(i,j+1,k)) + cis*(s.velY(i,j,k)-s.velY(i,j-1,k));
+                VM(Kw, j+1) = cin*(s.velZ(i,j,k)-s.velZ(i,j+1,k)) + cis*(s.velZ(i,j,k)-s.velZ(i,j-1,k));
+            }
+            VM(Ku, jStart+1) = 2.0*VM(Ku, jStart+2) - VM(Ku, jStart+3);
+            VM(Kv, jStart+1) = 2.0*VM(Kv, jStart+2) - VM(Kv, jStart+3);
+            VM(Kw, jStart+1) = 2.0*VM(Kw, jStart+2) - VM(Kw, jStart+3);
+            VM(Ku, jEnd+1)   = 2.0*VM(Ku, jEnd)   - VM(Ku, jEnd-1);
+            VM(Kv, jEnd+1)   = 2.0*VM(Kv, jEnd)   - VM(Kv, jEnd-1);
+            VM(Kw, jEnd+1)   = 2.0*VM(Kw, jEnd)   - VM(Kw, jEnd-1);
+            for (int j = jStart; j <= jEnd-1; ++j) {
+                VM(Ku, j+1) = 0.5*(VM(Ku, j+1) + VM(Ku, j+2));
+                VM(Kv, j+1) = 0.5*(VM(Kv, j+1) + VM(Kv, j+2));
+                VM(Kw, j+1) = 0.5*(VM(Kw, j+1) + VM(Kw, j+2));
+            }
+            for (int j = jStart+1; j <= jEnd-1; ++j) {
+                s.accelX(i, j, k) -= (VM(Ku,j+1)*VM(qsin,j+1) - VM(Ku,j)*VM(qsin,j));
+                s.accelY(i, j, k) -= (VM(Kv,j+1)*VM(qsin,j+1) - VM(Kv,j)*VM(qsin,j));
+                s.accelZ(i, j, k) -= (VM(Kw,j+1)*VM(qsin,j+1) - VM(Kw,j)*VM(qsin,j));
+            }
+        }
+    }
+
+    // ---------- Direction Z ----------
+    const double invDz2 = 1.0 / (cfg.cellSizeZ * cfg.cellSizeZ);
+    for (int i = 1; i <= s.numCellsXm1; ++i) {
+        const double invRe = effectiveInvRe(s, i);
+        const double localRe = 1.0 / invRe;
+        for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
+            for (int k = 0; k <= KKfim; ++k) {
+                int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
+                const double wFace = 0.5 * (s.velZ(i, j, kp) + s.velZ(i, j, k));
+                const double DPe = localRe * wFace * cfg.cellSizeZ;
+                double pip, ciu, cid;
+                computeExponentialWeights(localRe, DPe, pip, ciu, cid);
+                VM(ppiu, k+1) = ciu;
+                VM(ppid, kp+1) = cid;
+                VM(qsiu, k+1) = computeQsi(DPe, pip, 0.5);
+            }
+            for (int k = 1; k <= KKfim; ++k) {
+                int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
+                int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
+                const double coeff = invDz2;
+                s.accelX(i, j, k) += (VM(ppiu,k+1)*(s.velX(i,j,kp)-s.velX(i,j,k))
+                                     + VM(ppid,k+1)*(s.velX(i,j,km)-s.velX(i,j,k))) * coeff;
+                s.accelY(i, j, k) += (VM(ppiu,k+1)*(s.velY(i,j,kp)-s.velY(i,j,k))
+                                     + VM(ppid,k+1)*(s.velY(i,j,km)-s.velY(i,j,k))) * coeff;
+                s.accelZ(i, j, k) += (VM(ppiu,k+1)*(s.velZ(i,j,kp)-s.velZ(i,j,k))
+                                     + VM(ppid,k+1)*(s.velZ(i,j,km)-s.velZ(i,j,k))) * coeff;
+            }
+            for (int k = 1; k <= KKfim; ++k) {
+                int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
+                int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
+                const double wCell = s.velZ(i, j, k);
+                const double DPe = localRe * wCell * cfg.cellSizeZ;
+                double pip, ciu, cid;
+                computeExponentialWeights(localRe, DPe, pip, ciu, cid);
+                ciu *= invDz2;  cid *= invDz2;
+                VM(Ku, k+1) = ciu*(s.velX(i,j,k)-s.velX(i,j,kp)) + cid*(s.velX(i,j,k)-s.velX(i,j,km));
+                VM(Kv, k+1) = ciu*(s.velY(i,j,k)-s.velY(i,j,kp)) + cid*(s.velY(i,j,k)-s.velY(i,j,km));
+                VM(Kw, k+1) = ciu*(s.velZ(i,j,k)-s.velZ(i,j,kp)) + cid*(s.velZ(i,j,k)-s.velZ(i,j,km));
+            }
+            if (!periodic) { // Dirichlet in z: extrapolate
+                VM(Ku, 0+1) = 2.0*VM(Ku,1+1) - VM(Ku,2+1);
+                VM(Kv, 0+1) = 2.0*VM(Kv,1+1) - VM(Kv,2+1);
+                VM(Kw, 0+1) = 2.0*VM(Kw,1+1) - VM(Kw,2+1);
+                VM(Ku, cfg.numCellsZ+1) = 2.0*VM(Ku, s.numCellsZm1+1) - VM(Ku, cfg.numCellsZ-1+1);
+                VM(Kv, cfg.numCellsZ+1) = 2.0*VM(Kv, s.numCellsZm1+1) - VM(Kv, cfg.numCellsZ-1+1);
+                VM(Kw, cfg.numCellsZ+1) = 2.0*VM(Kw, s.numCellsZm1+1) - VM(Kw, cfg.numCellsZ-1+1);
+            }
+            for (int k = 0; k <= KKfim; ++k) {
+                int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
+                VM(Ku, k+1) = 0.5*(VM(Ku, k+1) + VM(Ku, kp+1));
+                VM(Kv, k+1) = 0.5*(VM(Kv, k+1) + VM(Kv, kp+1));
+                VM(Kw, k+1) = 0.5*(VM(Kw, k+1) + VM(Kw, kp+1));
+            }
+            for (int k = 1; k <= KKfim; ++k) {
+                int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
+                s.accelX(i, j, k) -= (VM(Ku,k+1)*VM(qsiu,k+1) - VM(Ku,km+1)*VM(qsiu,km+1));
+                s.accelY(i, j, k) -= (VM(Kv,k+1)*VM(qsiu,k+1) - VM(Kv,km+1)*VM(qsiu,km+1));
+                s.accelZ(i, j, k) -= (VM(Kw,k+1)*VM(qsiu,k+1) - VM(Kw,km+1)*VM(qsiu,km+1));
+            }
+        }
+    }
+
+    // Periodic copy in z
     if (periodic) {
         for (int i = 1; i <= s.numCellsXm1; ++i)
             for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
