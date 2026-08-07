@@ -77,20 +77,22 @@ Edit `config_re100_expansion.cfg`.  All keys and allowed values:
 ## Project Structure
 
 ```
-navsolver/
-├── include/
-│   ├── GridField.hpp       # Strongly-typed 3-D field wrapper
-│   ├── SimState.hpp        # Complete simulation state struct
-│   ├── Physics.hpp         # Forward declarations for solver kernels
-│   ├── VtkExporter.hpp     # VTK / CSV output (industrial standard)
-│   ├── ConfigParser.hpp    # Key=value config file parser
-│   └── Logger.hpp          # Structured, multi-level logger
-├── src/
-│   ├── Physics.cpp         # All numerical kernels
-│   └── main.cpp            # CLI, time loop, VTK export calls
-├── Makefile
-├── config_re100_expansion.cfg
-└── README.md
+NavSolver/
+├── src/                        # C++ code only
+│   ├── common/                 # Physics kernels (ONCE), config, logging, VTK
+│   ├── serial/                 # Serial CPU: AoS layout, simple loops
+│   ├── openmp/                 # OpenMP: AoS layout, #pragma omp
+│   ├── cuda/                   # CUDA: SoA layout, GPU kernels
+│   └── mpi_cuda/               # MPI+CUDA: 1D decomposition, halo exchange
+│
+├── experiments/                # Self-contained experiments
+│   ├── configs/                # All .cfg files (Re=100, Re=500, scaling, etc.)
+│   ├── results/                # Output from C++ solvers (gitignored)
+│   └── notebooks/              # Jupyter for loading results, plotting, comparison
+│
+├── tests/                      # Unit and integration tests
+├── scripts/                    # Build and run utilities
+└── docs/                       # Documentation
 ```
 
 ## Physics
