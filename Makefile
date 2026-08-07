@@ -8,6 +8,9 @@
 #    make clean       — Remove build artefacts
 #    make run         — Release build + run with default config
 #    make check       — Build + run a minimal smoke test
+#    make test        — Build + run the unit test suite (tests/)
+#    make bench       — Build + run the timing harness (scripts/benchmark.py)
+#    make validate    — Build + run physics correctness checks (scripts/validate.py)
 #
 #  Requirements:
 #    g++ >= 9  (or clang++ >= 10) with C++17 support
@@ -24,8 +27,19 @@ INCDIR   := src/common
 BUILDDIR := build
 TARGET   := navsolver
 
+TESTDIR       := tests
+TESTBUILDDIR  := build/tests
+TEST_TARGET   := navsolver_tests
+
 SRCS := $(wildcard $(SRCDIR)/*.cpp)
 OBJS := $(patsubst $(SRCDIR)/%.cpp, $(BUILDDIR)/%.o, $(SRCS))
+
+TEST_SRCS := $(shell find $(TESTDIR) -name '*.cpp')
+TEST_OBJS := $(patsubst $(TESTDIR)/%.cpp, $(TESTBUILDDIR)/%.o, $(TEST_SRCS))
+
+# Tests link the solver's physics kernels directly (not main.cpp, which
+# has its own main()) so PhysicsTests.cpp can exercise them in isolation.
+TEST_PHYSICS_OBJ := $(TESTBUILDDIR)/serial_Physics.o
 
 # ── Build profiles ─────────────────────────────────────────────────────────────
 RELEASE_FLAGS  := -O3 -DNDEBUG -march=native -funroll-loops
@@ -37,7 +51,7 @@ SANITIZE_FLAGS := -O1 -g -fsanitize=address,undefined,leak \
 EXTRA_FLAGS ?= $(RELEASE_FLAGS)
 
 # ── Default target ─────────────────────────────────────────────────────────────
-.PHONY: all debug sanitize clean run check
+.PHONY: all debug sanitize clean run check test bench validate
 
 all: $(TARGET)
 
@@ -66,14 +80,39 @@ run: all
 
 check: all
 	@echo "Running smoke test (10 steps)…"
-	@printf "numCellsX = 12\nnumCellsY = 8\nnumCellsZ = 8\nmaxTimeSteps = 10\nreportEveryN = 5\n" \
+	@printf "numCellsX = 12\nnumCellsY = 8\nnumCellsZ = 8\ngeometryShape = AbruptExpansion\nmaxTimeSteps = 10\nreportEveryN = 5\n" \
 	    > /tmp/navsolver_check.cfg
 	./$(TARGET) /tmp/navsolver_check.cfg
 	@echo "Smoke test passed."
 
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
+
+bench:
+	python3 scripts/benchmark.py
+
+validate:
+	python3 scripts/validate.py
+
+$(TEST_TARGET): $(TEST_OBJS) $(TEST_PHYSICS_OBJ)
+	@echo "  LINK  $@"
+	$(CXX) $(CXXFLAGS) -O0 -g -o $@ $^
+
+$(TESTBUILDDIR)/%.o: $(TESTDIR)/%.cpp | $(TESTBUILDDIR)
+	@echo "  CXX   $<"
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(TESTDIR) -c $< -o $@
+
+$(TEST_PHYSICS_OBJ): $(SRCDIR)/Physics.cpp | $(TESTBUILDDIR)
+	@echo "  CXX   $<"
+	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -c $< -o $@
+
+$(TESTBUILDDIR):
+	@mkdir -p $(TESTBUILDDIR)
+
 clean:
 	@echo "  CLEAN"
-	@rm -rf $(BUILDDIR) $(TARGET)
+	@rm -rf $(BUILDDIR) $(TARGET) $(TEST_TARGET)
 	@rm -f navsolver.log /tmp/navsolver_check.cfg
 
 # ── Dependency tracking (auto-generated) ───────────────────────────────────────

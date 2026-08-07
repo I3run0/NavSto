@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build_type: [Release, Debug]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (CMake)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke test
+        run: |
+          printf 'numCellsX = 12\nnumCellsY = 8\nnumCellsZ = 8\ngeometryShape = AbruptExpansion\nmaxTimeSteps = 10\nreportEveryN = 5\n' \
+            > /tmp/navsolver_check.cfg
+          ./build/navsolver /tmp/navsolver_check.cfg
+
+  makefile-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check
+        run: make check
+      - name: make test
+        run: make test
+      - name: benchmark harness smoke check
+        run: python3 scripts/benchmark.py --sizes tiny --steps 10 --repeats 1 --skip-build
+      - name: physics correctness checks
+        run: python3 scripts/validate.py --skip-build

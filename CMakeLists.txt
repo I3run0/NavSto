@@ -41,8 +41,26 @@ add_custom_target(run
 # Make check target
 add_custom_target(check
     COMMAND ${CMAKE_COMMAND} -E echo "Running smoke test..."
-    COMMAND sh -c "printf 'numCellsX = 12\nnumCellsY = 8\nnumCellsZ = 8\nmaxTimeSteps = 10\nreportEveryN = 5\n' > /tmp/navsolver_check.cfg"
+    COMMAND sh -c "printf 'numCellsX = 12\nnumCellsY = 8\nnumCellsZ = 8\ngeometryShape = AbruptExpansion\nmaxTimeSteps = 10\nreportEveryN = 5\n' > /tmp/navsolver_check.cfg"
     COMMAND ./navsolver /tmp/navsolver_check.cfg
     DEPENDS navsolver
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── Unit tests ───────────────────────────────────────────────────────────────
+enable_testing()
+
+file(GLOB_RECURSE TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+
+add_executable(navsolver_tests ${TEST_SRCS} ${SRCDIR}/Physics.cpp)
+
+target_include_directories(navsolver_tests PRIVATE
+    ${INCDIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+)
+
+target_compile_options(navsolver_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
+)
+
+add_test(NAME unit_tests COMMAND navsolver_tests)

@@ -266,6 +266,25 @@ void initSimulation(SimState& s)
     s.pressureSource.fill(0.0);
 
     // ── Geometry: fill jLow/jHigh and iLow/iHigh ────────────────────────────
+    // SharpCorner/RoundedCorner derive several index bounds directly from
+    // baseUnit (e.g. degreeIndex2 = baseUnit, rampIndexX1 ~= 1.25*baseUnit);
+    // if baseUnit isn't kept well below the grid size, those bounds exceed
+    // jLow/jHigh's allocated range (numCellsX+1) and corrupt heap memory.
+    // The original Pascal convention keeps baseUnit == numCellsY/2, so
+    // requiring baseUnit <= numCellsY/2 and <= numCellsX/2 stays safely
+    // inside that convention (verified against every checked-in .cfg).
+    if (cfg.geometryShape == GeometryShape::SharpCorner ||
+        cfg.geometryShape == GeometryShape::RoundedCorner) {
+        if (cfg.baseUnit < 1 || cfg.baseUnit > cfg.numCellsX / 2 ||
+            cfg.baseUnit > cfg.numCellsY / 2) {
+            throw std::invalid_argument(
+                "baseUnit=" + std::to_string(cfg.baseUnit) +
+                " is incompatible with grid " + std::to_string(cfg.numCellsX) +
+                "x" + std::to_string(cfg.numCellsY) + " for this geometryShape "
+                "(need 1 <= baseUnit <= min(numCellsX, numCellsY)/2)");
+        }
+    }
+
     switch (cfg.geometryShape) {
     case GeometryShape::AbruptExpansion:
         s.degreeIndexY = cfg.numCellsY / 2;
@@ -326,8 +345,13 @@ void initSimulation(SimState& s)
         break;
     }
 
+    case GeometryShape::Straight:
     default:
-        // Straight channel fallback — full domain active
+        // Straight channel — full domain active at every x (no expansion,
+        // contraction, or corner). Used for analytical validation (plane
+        // Poiseuille flow has a closed-form solution only when the channel
+        // is straight end-to-end) and as the fallback for shapes not yet
+        // implemented (OpenCavity, GradualExpansion, etc).
         for (int i = 0; i <= cfg.numCellsX; ++i) { s.jLow[i] = 0; s.jHigh[i] = cfg.numCellsY; }
         for (int j = 0; j <= cfg.numCellsY; ++j) { s.iLow[j] = 0; s.iHigh[j] = cfg.numCellsX; }
         s.degreeIndex1 = cfg.numCellsX + 1;
@@ -407,13 +431,17 @@ void computeAccelerations(SimState& s)
     s.accelY.fill(0.0);
     s.accelZ.fill(0.0);
 
-    // Temporary 1‑D arrays (logical index -1 .. maxDim) offset by +1
+    // Temporary 1‑D arrays (logical index -1 .. maxDim+1) offset by +1.
+    // Sized maxDim+3 (not maxDim+2): several writes below reach logical
+    // index maxDim+1 (e.g. VM(ppiw, i+2) at i==iEnd-1==maxDim-1, and the
+    // VM(Ku, iEnd+1)/VM(Ku, jEnd+1)/VM(Ku, numCellsZ+1) boundary
+    // extrapolations), which needs physical slot maxDim+2.
     const int maxDim = std::max({cfg.numCellsX, cfg.numCellsY, cfg.numCellsZ});
-    std::vector<double> ppie(maxDim+2, 0.0), ppiw(maxDim+2, 0.0);
-    std::vector<double> ppin(maxDim+2, 0.0), ppis(maxDim+2, 0.0);
-    std::vector<double> ppiu(maxDim+2, 0.0), ppid(maxDim+2, 0.0);
-    std::vector<double> qsie(maxDim+2, 0.0), qsin(maxDim+2, 0.0), qsiu(maxDim+2, 0.0);
-    std::vector<double> Ku(maxDim+2, 0.0),    Kv(maxDim+2, 0.0),    Kw(maxDim+2, 0.0);
+    std::vector<double> ppie(maxDim+3, 0.0), ppiw(maxDim+3, 0.0);
+    std::vector<double> ppin(maxDim+3, 0.0), ppis(maxDim+3, 0.0);
+    std::vector<double> ppiu(maxDim+3, 0.0), ppid(maxDim+3, 0.0);
+    std::vector<double> qsie(maxDim+3, 0.0), qsin(maxDim+3, 0.0), qsiu(maxDim+3, 0.0);
+    std::vector<double> Ku(maxDim+3, 0.0),    Kv(maxDim+3, 0.0),    Kw(maxDim+3, 0.0);
 
     // Helper to access offset arrays (logical idx -> physical idx+1)
     auto VM = [](std::vector<double>& v, int idx) -> double& { return v[idx+1]; };

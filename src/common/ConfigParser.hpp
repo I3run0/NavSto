@@ -146,6 +146,7 @@ private:
         if (v == "UnilateralContraction") return GeometryShape::UnilateralContraction;
         if (v == "SharpCorner")           return GeometryShape::SharpCorner;
         if (v == "RoundedCorner")         return GeometryShape::RoundedCorner;
+        if (v == "Straight")              return GeometryShape::Straight;
         throw std::runtime_error("Unknown geometryShape: " + v);
     }
     static GeometryType parseGeoType(const std::string& v) {

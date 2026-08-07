@@ -4,6 +4,8 @@ Solves the 3-D incompressible Navier-Stokes equations on a staggered Cartesian
 grid using the **UNIFAES exponential scheme** and an explicit **fractional-step
 (projection) method**, with both steady-state marching and **RK4 transient** integrators.
 
+See [`CHANGELOG.md`](CHANGELOG.md) for notable changes, including known issues.
+
 ## Build
 
 ```bash
@@ -15,10 +17,63 @@ make debug
 
 # Run with example config
 ./navsolver config_re100_expansion.cfg
+
+# Unit tests
+make test
+
+# Physics correctness checks (conservation + analytical Poiseuille check)
+make validate
 ```
 
 Requires **g++ ≥ 9** (or clang++ ≥ 10) with C++17 support.  No external
 libraries are needed.
+
+A `CMakeLists.txt` is also provided (`cmake -S . -B build && cmake --build build
+&& ctest --test-dir build`) and mirrors the Makefile's Release/Debug profiles
+plus the `navsolver_tests` target.
+
+## Benchmarking
+
+```bash
+make bench
+# or directly:
+python3 scripts/benchmark.py --sizes tiny,small,medium,large --steps 50 --repeats 3
+```
+
+Runs the solver across a fixed grid-size matrix with `convergenceTol=0` (so
+every run does exactly `maxTimeSteps` of work — an apples-to-apples fixed
+workload rather than "however many steps until convergence"), times
+wall-clock execution (min of `--repeats`), and writes a CSV to
+`experiments/results/benchmarks/` with `seconds/step` and a
+grid-size-normalized `ns/(active-cell·step)` throughput metric. This is the
+baseline the OpenMP/CUDA/MPI implementations should be compared against —
+see [`CHANGELOG.md`](CHANGELOG.md) for the current serial baseline numbers
+and known correctness caveats before optimizing further.
+
+## Correctness checks
+
+```bash
+make validate
+# or directly:
+python3 scripts/validate.py
+```
+
+Two tiers, both required to pass before trusting a performance number:
+
+1. **Conservation/stability sanity checks** — runs a couple of representative
+   configs and fails if `ResidMax`/`DilMax` ever go non-finite or blow up.
+   Coarse by design (a crash/divergence detector for CI), not a substitute
+   for #2.
+2. **Analytical check (plane Poiseuille flow)** — `experiments/configs/poiseuille.cfg`
+   uses `geometryShape=Straight` + `lateralBC=Periodic` +
+   `initialProfile=InletProfile`, which seeds the exact closed-form solution
+   `u(y) = 6·yNorm·(1-yNorm)·Umax` as the initial condition. A correct
+   discretization should reproduce it almost exactly (residual near machine
+   epsilon) for the whole run, since it's already the steady state — this
+   tests whether the discrete operators are self-consistent with a known
+   exact solution. It does *not* test convergence to that solution from an
+   arbitrary start; a full grid-convergence study would be the next step for
+   that.
 
 ## Usage
 
@@ -81,18 +136,24 @@ NavSolver/
 ├── src/                        # C++ code only
 │   ├── common/                 # Physics kernels (ONCE), config, logging, VTK
 │   ├── serial/                 # Serial CPU: AoS layout, simple loops
-│   ├── openmp/                 # OpenMP: AoS layout, #pragma omp
-│   ├── cuda/                   # CUDA: SoA layout, GPU kernels
-│   └── mpi_cuda/               # MPI+CUDA: 1D decomposition, halo exchange
+│   ├── openmp/                 # (planned) OpenMP: AoS layout, #pragma omp
+│   ├── cuda/                   # (planned) CUDA: SoA layout, GPU kernels
+│   └── mpi_cuda/               # (planned) MPI+CUDA: 1D decomposition, halo exchange
 │
 ├── experiments/                # Self-contained experiments
 │   ├── configs/                # All .cfg files (Re=100, Re=500, scaling, etc.)
 │   ├── results/                # Output from C++ solvers (gitignored)
 │   └── notebooks/              # Jupyter for loading results, plotting, comparison
 │
-├── tests/                      # Unit and integration tests
-├── scripts/                    # Build and run utilities
-└── docs/                       # Documentation
+├── tests/                      # Unit tests (header-only harness, no deps),
+│                                # wired into `ctest` and `make test`
+├── scripts/                    # benchmark.py (make bench), validate.py (make validate)
+├── reference/                  # Legacy Pascal-derived C++ translation
+│                                # (navsto_dynamic.cpp) and validation data,
+│                                # kept for cross-checking the modernized solver
+├── docs/                       # Documentation (placeholder, not yet populated)
+├── CHANGELOG.md                # Notable changes, Keep a Changelog format
+└── .github/workflows/          # CI: build + unit tests + smoke test on push/PR
 ```
 
 ## Physics
