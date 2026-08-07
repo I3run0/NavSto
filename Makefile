@@ -11,6 +11,7 @@
 #    make test        — Build + run the unit test suite (tests/)
 #    make bench       — Build + run the timing harness (scripts/benchmark.py)
 #    make validate    — Build + run physics correctness checks (scripts/validate.py)
+#    make profile     — Build with gprof instrumentation (-pg); see docs/
 #
 #  Requirements:
 #    g++ >= 9  (or clang++ >= 10) with C++17 support
@@ -46,12 +47,15 @@ RELEASE_FLAGS  := -O3 -DNDEBUG -march=native -funroll-loops
 DEBUG_FLAGS    := -O0 -g3 -DDEBUG -fsanitize=address -fno-omit-frame-pointer
 SANITIZE_FLAGS := -O1 -g -fsanitize=address,undefined,leak \
                   -fno-omit-frame-pointer
+# -O2 (not -O3) to keep function boundaries visible in the call graph —
+# aggressive inlining at -O3 can hide where time is actually spent.
+PROFILE_FLAGS  := -O2 -g -DNDEBUG -pg
 
 # Default: Release
 EXTRA_FLAGS ?= $(RELEASE_FLAGS)
 
 # ── Default target ─────────────────────────────────────────────────────────────
-.PHONY: all debug sanitize clean run check test bench validate
+.PHONY: all debug sanitize clean run check test bench validate profile
 
 all: $(TARGET)
 
@@ -60,6 +64,9 @@ debug:
 
 sanitize:
 	$(MAKE) EXTRA_FLAGS="$(SANITIZE_FLAGS)" $(TARGET)
+
+profile:
+	$(MAKE) EXTRA_FLAGS="$(PROFILE_FLAGS)" $(TARGET)
 
 # ── Link ───────────────────────────────────────────────────────────────────────
 $(TARGET): $(OBJS)

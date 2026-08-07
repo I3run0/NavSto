@@ -116,21 +116,32 @@ public:
     }
 
     /// Write a simple CSV convergence history line-by-line.
-    /// File is opened in append mode so successive time steps accumulate.
+    ///
+    /// Keeps one file handle open for the process lifetime instead of
+    /// opening/stat'ing/closing on every call — this is called once per
+    /// timestep, and a long transient run (e.g. maxTimeSteps=200000 in
+    /// production_can.cfg) would otherwise do 200,000 open+stat+close
+    /// cycles for what should be a single file opened once. Safe because
+    /// navsolver runs exactly one simulation per process; a fresh process
+    /// (fresh statics) is what starts a new run.
     static void writeConvergenceCSV(const SimState& s) {
         namespace fs = std::filesystem;
-        fs::create_directories(s.cfg.outputDir);
+        static std::ofstream csvFile;
 
-        std::string csvPath = (s.cfg.outputDir / (s.cfg.runName + "_convergence.csv")).string();
-        bool isNew = !fs::exists(csvPath);
+        if (!csvFile.is_open()) {
+            fs::create_directories(s.cfg.outputDir);
+            std::string csvPath = (s.cfg.outputDir / (s.cfg.runName + "_convergence.csv")).string();
+            bool isNew = !fs::exists(csvPath);
 
-        std::ofstream f(csvPath, std::ios::app);
-        if (!f) throw std::runtime_error("VtkExporter: cannot open " + csvPath);
+            csvFile.open(csvPath, std::ios::app);
+            if (!csvFile) throw std::runtime_error("VtkExporter: cannot open " + csvPath);
 
-        if (isNew) {
-            f << "step,time,ResidMax,ResidRMS,DilMax,IntDiv,IntAbsDiv,dt\n";
+            if (isNew) {
+                csvFile << "step,time,ResidMax,ResidRMS,DilMax,IntDiv,IntAbsDiv,dt\n";
+            }
         }
-        f << std::fixed << std::setprecision(8)
+
+        csvFile << std::fixed << std::setprecision(8)
           << s.timeStep        << ","
           << s.simulationTime  << ","
           << s.momentumResidMax << ","
@@ -139,5 +150,7 @@ public:
           << s.intDivergence   << ","
           << s.intAbsDivergence << ","
           << s.timeStepSize    << "\n";
+        csvFile.flush();  // keep the file readable by external tools mid-run,
+                           // without paying for a full reopen/close per step
     }
 };

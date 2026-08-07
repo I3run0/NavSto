@@ -10,6 +10,7 @@
 
     #include "GridField.hpp"
 
+    #include <algorithm>
     #include <string>
     #include <vector>
     #include <fstream>
@@ -71,6 +72,12 @@
         std::filesystem::path outputDir  = "results";
         std::string           runName    = "cam_re9600";
         int                   numPressureIter = 5;
+
+        // SOR relaxation factor for the pressure Poisson solve (1.0 = plain
+        // Gauss-Seidel). 1.7 converges noticeably faster than 1.0 for this
+        // grid/BC mix without the divergence risk of pushing closer to 2.0;
+        // see docs/serial-optimization.md for how this was chosen/verified.
+        double sorOmega = 1.7;
     };
 
     // ---------------------------------------------------------------------------
@@ -135,6 +142,20 @@
         GridField<> pressureSource;  ///< s  — RHS of pressure Poisson
         GridField<> scratchField;    ///< temporary (stream func., residuals…)
 
+        // ── computeAccelerations() scratch buffers ──────────────────────────────────
+        // Owned here (sized once in allocateFields()) instead of being
+        // std::vector-allocated fresh on every computeAccelerations() call
+        // (every timestep, and multiple times per step for RK4 substeps).
+        // Safe to reuse without re-zeroing between calls: the active index
+        // range each call touches is fixed by geometry (set once in
+        // initSimulation() and never changed afterward), and every entry
+        // in that range is written before it's read within the same call —
+        // so whatever was left over from the previous call is always
+        // overwritten before use. If that invariant ever changes (e.g. a
+        // future adaptive/moving geometry), these need re-zeroing per call.
+        std::vector<double> ppie, ppiw, ppin, ppis, ppiu, ppid;
+        std::vector<double> qsie, qsin, qsiu, Ku, Kv, Kw;
+
         // ── Log / output ───────────────────────────────────────────────────────────
         std::ofstream logFile;
 
@@ -167,5 +188,14 @@
             iHigh.assign(g.sJ, 0);
             jLow .assign(g.sI, 0);
             jHigh.assign(g.sI, 0);
+
+            // computeAccelerations() scratch buffers — see field comments.
+            const int maxDim = std::max({cfg.numCellsX, cfg.numCellsY, cfg.numCellsZ});
+            const std::size_t scratchLen = static_cast<std::size_t>(maxDim) + 3;
+            ppie.assign(scratchLen, 0.0); ppiw.assign(scratchLen, 0.0);
+            ppin.assign(scratchLen, 0.0); ppis.assign(scratchLen, 0.0);
+            ppiu.assign(scratchLen, 0.0); ppid.assign(scratchLen, 0.0);
+            qsie.assign(scratchLen, 0.0); qsin.assign(scratchLen, 0.0); qsiu.assign(scratchLen, 0.0);
+            Ku  .assign(scratchLen, 0.0); Kv  .assign(scratchLen, 0.0); Kw  .assign(scratchLen, 0.0);
         }
     };

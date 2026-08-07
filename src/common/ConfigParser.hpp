@@ -75,6 +75,7 @@ public:
         setIfPresent(kv, "reportEveryN",     cfg.reportEveryN);
         setIfPresent(kv, "convergenceTol",   cfg.convergenceTol);
         setIfPresent(kv, "numPressureIter",  cfg.numPressureIter);
+        setIfPresent(kv, "sorOmega",         cfg.sorOmega);
 
         if (kv.count("outputDir"))  cfg.outputDir = kv["outputDir"];
         if (kv.count("runName"))    cfg.runName   = kv["runName"];
@@ -112,6 +113,7 @@ public:
         f << "reportEveryN     = " << cfg.reportEveryN     << '\n';
         f << "convergenceTol   = " << cfg.convergenceTol   << '\n';
         f << "numPressureIter  = " << cfg.numPressureIter  << '\n';
+        f << "sorOmega         = " << cfg.sorOmega         << '\n';
         f << "outputDir        = " << cfg.outputDir.string() << '\n';
         f << "runName          = " << cfg.runName          << '\n';
     }

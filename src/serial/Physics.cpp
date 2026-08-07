@@ -432,16 +432,18 @@ void computeAccelerations(SimState& s)
     s.accelZ.fill(0.0);
 
     // Temporary 1‑D arrays (logical index -1 .. maxDim+1) offset by +1.
-    // Sized maxDim+3 (not maxDim+2): several writes below reach logical
-    // index maxDim+1 (e.g. VM(ppiw, i+2) at i==iEnd-1==maxDim-1, and the
-    // VM(Ku, iEnd+1)/VM(Ku, jEnd+1)/VM(Ku, numCellsZ+1) boundary
-    // extrapolations), which needs physical slot maxDim+2.
-    const int maxDim = std::max({cfg.numCellsX, cfg.numCellsY, cfg.numCellsZ});
-    std::vector<double> ppie(maxDim+3, 0.0), ppiw(maxDim+3, 0.0);
-    std::vector<double> ppin(maxDim+3, 0.0), ppis(maxDim+3, 0.0);
-    std::vector<double> ppiu(maxDim+3, 0.0), ppid(maxDim+3, 0.0);
-    std::vector<double> qsie(maxDim+3, 0.0), qsin(maxDim+3, 0.0), qsiu(maxDim+3, 0.0);
-    std::vector<double> Ku(maxDim+3, 0.0),    Kv(maxDim+3, 0.0),    Kw(maxDim+3, 0.0);
+    // Sized maxDim+3 (not maxDim+2) in SimState::allocateFields(): several
+    // writes below reach logical index maxDim+1 (e.g. VM(ppiw, i+2) at
+    // i==iEnd-1==maxDim-1, and the VM(Ku, iEnd+1)/VM(Ku, jEnd+1)/
+    // VM(Ku, numCellsZ+1) boundary extrapolations), which needs physical
+    // slot maxDim+2. Owned by SimState and reused across calls instead of
+    // being allocated fresh every call — see the field comments there for
+    // why that's safe without re-zeroing.
+    auto& ppie = s.ppie; auto& ppiw = s.ppiw;
+    auto& ppin = s.ppin; auto& ppis = s.ppis;
+    auto& ppiu = s.ppiu; auto& ppid = s.ppid;
+    auto& qsie = s.qsie; auto& qsin = s.qsin; auto& qsiu = s.qsiu;
+    auto& Ku = s.Ku; auto& Kv = s.Kv; auto& Kw = s.Kw;
 
     // Helper to access offset arrays (logical idx -> physical idx+1)
     auto VM = [](std::vector<double>& v, int idx) -> double& { return v[idx+1]; };
@@ -765,7 +767,11 @@ void solvePressurePoisson(SimState& s)
                             if (cfg.lateralCondition == LateralBC::SolidWall && (k==1 || k==cfg.numCellsZ))
                                 pNew -= 2.0 * s.pressureSource(i,j,k) * invDiag;
                         }
-                        s.press(i, j, k) = pNew;
+                        // SOR: over-relax the Gauss-Seidel update (omega=1
+                        // reduces to plain Gauss-Seidel) — same per-cell
+                        // cost, converges to the same fixed point in fewer
+                        // sweeps.
+                        s.press(i, j, k) += cfg.sorOmega * (pNew - s.press(i, j, k));
                     }
                 }
             }

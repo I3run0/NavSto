@@ -44,8 +44,41 @@ under `[Unreleased]`.
   (2) an analytical check using plane Poiseuille flow — see the fix to
   `poiseuille.cfg` below for how that's set up, and the README's
   "Correctness checks" section for what this test does and doesn't cover.
+- `make profile` — `-O2 -g -pg` gprof-instrumented build target.
+- `cfg.sorOmega` (default `1.7`) — SOR relaxation factor for the pressure
+  solve, see Changed below.
+- `docs/serial-optimization.md` — a real profiling pass (gprof baseline,
+  three fixes applied, before/after wall-clock numbers, and an honestly-
+  reported case where a naive fix attempt turned out unstable and wasn't
+  shipped). Start here before doing any more serial-performance work.
 
 ### Changed
+- **`solvePressurePoisson()`: Gauss-Seidel → SOR.** Same per-cell cost
+  (one extra FMA) but converges markedly faster per sweep — an isolated test
+  showed SOR (`omega=1.7`) matching 20-sweep plain-Gauss-Seidel accuracy in
+  just 5 sweeps. `numPressureIter` (the fixed per-step sweep count) was
+  deliberately left unchanged in every shipped config — a naive attempt to
+  cash in the faster convergence by cutting it aggressively (`5→2`) passed
+  an isolated single-step check but *diverged over a real multi-step run*;
+  `5→3` is verified stable but is documented as a recommendation, not
+  applied to configs, since it needs the same per-config full-run check.
+  Full writeup, including the matched-iteration-count wall-clock numbers
+  (small win at small grids, a wash at larger ones — SOR's real benefit
+  needs the sweep-count reduction to show up as wall-clock speedup) in
+  `docs/serial-optimization.md`.
+- **`computeAccelerations()`'s 12 scratch buffers** (`ppie`, `ppiw`, `Ku`, ...)
+  moved from being `std::vector`-allocated fresh every call to
+  `SimState`-owned storage allocated once. Verified bit-identical results
+  before/after (numerically a no-op, purely removes allocation overhead) —
+  measured effect was modest (`gprof` never showed allocation as a distinct
+  cost center; see docs).
+- **`VtkExporter::writeConvergenceCSV()`** now keeps one file handle open
+  for the process lifetime (with an explicit `.flush()` after each write so
+  it's still readable mid-run) instead of opening, `fs::exists()`-checking,
+  and closing the file every timestep — this was invisible in a 100-step
+  `gprof` profile (blocking I/O doesn't register as CPU-sample time) but is
+  200,000 open/stat/close cycles for `production_can.cfg`'s
+  `maxTimeSteps=200000`.
 - Renamed `test_scripts/` to `reference/` — it holds the legacy
   Pascal-derived C++ translation (`navsto_dynamic.cpp`) and validation data
   (`harwelEabRe1000m120p0.txt`), not an automated test suite. The name was

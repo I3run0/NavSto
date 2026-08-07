@@ -50,6 +50,22 @@ baseline the OpenMP/CUDA/MPI implementations should be compared against —
 see [`CHANGELOG.md`](CHANGELOG.md) for the current serial baseline numbers
 and known correctness caveats before optimizing further.
 
+## Profiling
+
+```bash
+make profile                          # -O2 -pg instrumented build
+./navsolver <config>                  # generates gmon.out
+gprof ./navsolver gmon.out | less
+```
+
+`-O2` (not `-O3`) keeps function boundaries visible in the call graph —
+`-O3`'s aggressive inlining hides where time is actually spent. Don't use
+the `-pg` build to measure absolute wall-clock time — its per-call
+instrumentation overhead distorts it, especially for high-call-count
+functions; use `make bench` (a clean `-O3` build) for that instead. See
+[`docs/serial-optimization.md`](docs/serial-optimization.md) for a full
+profiling pass with real before/after numbers.
+
 ## Correctness checks
 
 ```bash
@@ -151,7 +167,7 @@ NavSolver/
 ├── reference/                  # Legacy Pascal-derived C++ translation
 │                                # (navsto_dynamic.cpp) and validation data,
 │                                # kept for cross-checking the modernized solver
-├── docs/                       # Documentation (placeholder, not yet populated)
+├── docs/                       # serial-optimization.md (profiling + tuning notes)
 ├── CHANGELOG.md                # Notable changes, Keep a Changelog format
 └── .github/workflows/          # CI: build + unit tests + smoke test on push/PR
 ```
