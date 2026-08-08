@@ -94,6 +94,20 @@ profiling pass with real before/after numbers.
   python3 scripts/benchmark.py --binary navsolver_omp --threads 1,2,4,6,12
   python3 scripts/plot_scaling.py <benchmark_csv>
   ```
+- [`docs/cuda-port.md`](docs/cuda-port.md) — full CUDA port (not just the
+  hot kernels — the whole per-step loop stays GPU-resident), one thread
+  per plane for `computeAccelerations`, one thread per active cell of one
+  color for the red-black pressure solve, `mirrorGhostCells` deliberately
+  kept `<<<1,1>>>` (same race avoided as the OpenMP port). Correctness
+  verified (`L2_rel=1.15e-3` vs serial, matching OpenMP's own result;
+  bit-identical determinism); performance honestly reported as a **negative
+  result** — 5.9×-18.6× slower than serial on this machine's entry-level
+  GPU, dominated by the single-thread `mirrorGhostCells` kernel.
+  ```bash
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --target navsolver_cuda
+  python3 scripts/validate_cuda.py
+  ```
 
 ## Correctness checks
 
@@ -182,7 +196,7 @@ NavSolver/
 │   ├── common/                 # Physics kernels (ONCE), config, logging, VTK
 │   ├── serial/                 # Serial CPU: AoS layout, simple loops
 │   ├── openmp/                 # OpenMP: red-black pressure solve, per-thread scratch
-│   ├── cuda/                   # (planned) CUDA: SoA layout, GPU kernels
+│   ├── cuda/                   # CUDA: one thread per plane/cell, red-black pressure solve
 │   └── mpi_cuda/               # (planned) MPI+CUDA: 1D decomposition, halo exchange
 │
 ├── experiments/                # Self-contained experiments
