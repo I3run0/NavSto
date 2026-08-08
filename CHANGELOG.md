@@ -10,6 +10,102 @@ under `[Unreleased]`.
 ## [Unreleased]
 
 ### Added
+- `src/openmp/` (copy of `src/serial/`, build wired via `make openmp` and
+  CMake's `find_package(OpenMP)`-guarded `navsolver_omp` target) +
+  `src/common/RedBlackIndexing.hpp` — red-black restructuring of
+  `solvePressurePoisson`, **serially verified, no `#pragma omp` yet**: the
+  serial solver's Gauss-Seidel/SOR has a loop-carried dependency that can't
+  be correctly parallelized as-is; red-black splits cells by `(i+j+k)`
+  parity so each color updates independently of the other. Built as shared
+  infrastructure (also the planned foundation for CUDA's pressure kernel).
+  Two real findings during verification, both documented in
+  `docs/openmp-parallelization.md`: (1) pressure has a null space (a
+  uniform additive offset never affects velocity), so comparisons must be
+  gauge-fixed (subtract each field's own mean) or they show a large,
+  physically-meaningless gap; (2) `AbruptExpansion`'s stepped geometry
+  doesn't fully converge even in the *original serial* solver at very
+  large sweep counts (a pre-existing property, unrelated to red-black,
+  never hit by real usage since production configs use 5-20 sweeps not
+  thousands) — the equivalence test uses the simpler `Straight` geometry
+  instead. Verified: `scripts/validate.py`'s new red-black equivalence
+  tier passes (gauge-fixed `L2_rel=1.15e-3`), the OpenMP binary
+  independently passes the Poiseuille analytical check at machine epsilon,
+  and ASan/UBSan are clean across both solid-wall and periodic boundary
+  configs.
+- **Actual OpenMP parallelism** on top of the red-black prerequisite above:
+  per-thread scratch buffers for `computeAccelerations` (`SimState`-owned,
+  sized `maxThreads × scratchLen`, `#ifdef _OPENMP`-guarded so the serial
+  build is unaffected), one `#pragma omp parallel` region wrapping all
+  three direction sweeps with `#pragma omp for schedule(static)` per sweep,
+  and `#pragma omp parallel for schedule(static)` on `solvePressurePoisson`'s
+  `updateColor`. **Found and fixed a real data race** while verifying:
+  initially also parallelized `mirrorGhostCells` on an "ownership" argument
+  that turned out wrong — caught via a determinism check (same config, same
+  thread count, different `DilMax` every run, which can't happen under
+  `schedule(static)` if race-free), isolated by binary search (disable one
+  pragma at a time) since ThreadSanitizer isn't usable in this WSL2 sandbox
+  (`FATAL: unexpected memory mapping` at startup — same class of limitation
+  as `perf`). Root cause: `mirrorGhostCells`'s same-row `j`-boundary writes
+  can collide with a different thread's cross-row `im`/`ip` write landing
+  in that same row. Fixed by leaving `mirrorGhostCells` serial (cheap
+  relative to `updateColor`'s real work, not worth the risk without a
+  sanitizer to verify a corrected version). Re-verified: bit-identical
+  results across `OMP_NUM_THREADS ∈ {1,2,4,6,8,12}` and 5 repeats at 12
+  threads, on two geometries, plus ASan/UBSan clean. Full writeup in
+  `docs/openmp-parallelization.md`.
+- `scripts/validate_parallel.py` (`make validate-parallel`, in CI) — formalizes
+  the thread-count-equivalence and determinism checks used to find/verify
+  the race above into automated tests. Both bit-identical (`L2_rel=0.0`)
+  across `OMP_NUM_THREADS ∈ {1,2,4,6,12}` — expected in retrospect, since
+  neither parallelized kernel does cross-thread reduction.
+- `scripts/benchmark.py --threads`/`--binary` + `scripts/plot_scaling.py` —
+  OpenMP strong-scaling measurement. Real finding, honestly not a good
+  result: peak speedup is only ~1.2-1.3x at 2 threads, then flat-to-declining
+  — by 12 threads the small grid runs *slower* than single-threaded. Matches
+  what `docs/roofline.md` predicted before any of this parallelization work
+  started (memory bandwidth here saturates almost immediately past ~2
+  threads). Full numbers and plot in `docs/openmp-parallelization.md`; the
+  practical implication is that on this machine, further single-thread
+  efficiency work (the still-unfinished Y-sweep restructuring) has more
+  headroom than adding OpenMP threads does.
+- `docs/roofline.md`, `scripts/roofline.py`, `scripts/roofline/*.cpp` —
+  roofline analysis for `computeAccelerations` and `solvePressurePoisson`:
+  three empirically-measured ceilings (FMA peak, memory bandwidth, and a
+  `std::exp()`-throughput ceiling — added because `computeExponentialWeights`
+  is ~13% of profiled time and is exp()-bound, not FMA-bound, so a
+  standard FMA-only roofline would give a misleading verdict), analytical
+  FLOP/byte/exp-call counts hand-derived from the kernels, and achieved
+  performance apportioned from a clean `-O3` build's wall time by a
+  `gprof` profile's relative breakdown. Verdict: `computeAccelerations`
+  shows a real, if methodologically caveated, memory/cache-bound signal
+  (see the doc for an honest report of where the conservative byte-count
+  assumption was falsified by the measurement) — proceed with the
+  loop-order restructuring identified in `docs/serial-optimization.md`.
+  `solvePressurePoisson` is not primarily bandwidth-bound (only ~5% of its
+  own generous bandwidth ceiling) — more likely limited by its Gauss-Seidel
+  read-after-write dependency chain, which is a second, independent reason
+  (beyond OpenMP/CUDA correctness) to want the red-black restructuring
+  already planned as a parallelization prerequisite. Also measured: memory
+  bandwidth on this machine saturates almost immediately past ~2 threads
+  (22→34 GB/s from 1→12 threads) — a memory-bound kernel won't scale well
+  with OpenMP thread count here, independent of the parallelization being
+  correct.
+- `docs/serial-optimization-loop-order.md` — acted on the roofline verdict:
+  restructured `computeAccelerations`'s X-direction sweep from
+  `for(j) for(k) for(i){5 passes}` (`i` innermost, non-unit-stride) to
+  `for(j) for(pass) for(i) for(k)` (`k` innermost, matching `GridField`'s
+  storage) by widening its scratch buffers from 1-D to 2-D
+  (`ppieXK`/`ppiwXK`/`qsieXK`/`KuXK`/`KvXK`/`KwXK` in `SimState`) — same
+  math, same `i`-recurrence order, only which loop is innermost changed.
+  Added `tests/serial/GoldenFieldTest.cpp` + a captured golden acceleration
+  field on a non-equilibrium config (the existing Poiseuille analytical
+  check alone can't catch a subtle bug here, since it tests self-consistency
+  at equilibrium where residuals are already ~0) — passes, bit-for-bit
+  equivalent to the pre-restructuring implementation. Measured effect:
+  `computeAccelerations`'s own self-time dropped ~17% (`gprof`, medium
+  grid); whole-program speedup 1.02x-1.12x depending on grid size (only
+  one of three direction sweeps fixed so far). Y-sweep has the identical
+  problem and is the natural next step, not yet done.
 - `CHANGELOG.md` (this file).
 - `tests/` unit-test scaffold (lightweight header-only harness, no external
   dependencies) with initial coverage for `GridField`, `ConfigParser`, and

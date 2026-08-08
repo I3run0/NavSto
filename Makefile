@@ -12,6 +12,8 @@
 #    make bench       — Build + run the timing harness (scripts/benchmark.py)
 #    make validate    — Build + run physics correctness checks (scripts/validate.py)
 #    make profile     — Build with gprof instrumentation (-pg); see docs/
+#    make openmp      — Build the OpenMP variant (navsolver_omp); see docs/
+#    make validate-parallel — OpenMP thread-count equivalence + determinism checks
 #
 #  Requirements:
 #    g++ >= 9  (or clang++ >= 10) with C++17 support
@@ -28,12 +30,19 @@ INCDIR   := src/common
 BUILDDIR := build
 TARGET   := navsolver
 
+OMPSRCDIR   := src/openmp
+OMPBUILDDIR := build/openmp
+OMP_TARGET  := navsolver_omp
+
 TESTDIR       := tests
 TESTBUILDDIR  := build/tests
 TEST_TARGET   := navsolver_tests
 
 SRCS := $(wildcard $(SRCDIR)/*.cpp)
 OBJS := $(patsubst $(SRCDIR)/%.cpp, $(BUILDDIR)/%.o, $(SRCS))
+
+OMPSRCS := $(wildcard $(OMPSRCDIR)/*.cpp)
+OMPOBJS := $(patsubst $(OMPSRCDIR)/%.cpp, $(OMPBUILDDIR)/%.o, $(OMPSRCS))
 
 TEST_SRCS := $(shell find $(TESTDIR) -name '*.cpp')
 TEST_OBJS := $(patsubst $(TESTDIR)/%.cpp, $(TESTBUILDDIR)/%.o, $(TEST_SRCS))
@@ -50,12 +59,13 @@ SANITIZE_FLAGS := -O1 -g -fsanitize=address,undefined,leak \
 # -O2 (not -O3) to keep function boundaries visible in the call graph —
 # aggressive inlining at -O3 can hide where time is actually spent.
 PROFILE_FLAGS  := -O2 -g -DNDEBUG -pg
+OMP_FLAGS      := -O3 -DNDEBUG -march=native -funroll-loops -fopenmp
 
 # Default: Release
 EXTRA_FLAGS ?= $(RELEASE_FLAGS)
 
 # ── Default target ─────────────────────────────────────────────────────────────
-.PHONY: all debug sanitize clean run check test bench validate profile
+.PHONY: all debug sanitize clean run check test bench validate profile openmp validate-parallel
 
 all: $(TARGET)
 
@@ -68,18 +78,31 @@ sanitize:
 profile:
 	$(MAKE) EXTRA_FLAGS="$(PROFILE_FLAGS)" $(TARGET)
 
+openmp: $(OMP_TARGET)
+
 # ── Link ───────────────────────────────────────────────────────────────────────
 $(TARGET): $(OBJS)
 	@echo "  LINK  $@"
 	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -o $@ $^
+
+$(OMP_TARGET): $(OMPOBJS)
+	@echo "  LINK  $@"
+	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -o $@ $^
 
 # ── Compile ────────────────────────────────────────────────────────────────────
 $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	@echo "  CXX   $<"
 	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -c $< -o $@
 
+$(OMPBUILDDIR)/%.o: $(OMPSRCDIR)/%.cpp | $(OMPBUILDDIR)
+	@echo "  CXX   $<"
+	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -c $< -o $@
+
 $(BUILDDIR):
 	@mkdir -p $(BUILDDIR)
+
+$(OMPBUILDDIR):
+	@mkdir -p $(OMPBUILDDIR)
 
 # ── Convenience targets ────────────────────────────────────────────────────────
 run: all
@@ -101,6 +124,9 @@ bench:
 validate:
 	python3 scripts/validate.py
 
+validate-parallel:
+	python3 scripts/validate_parallel.py
+
 $(TEST_TARGET): $(TEST_OBJS) $(TEST_PHYSICS_OBJ)
 	@echo "  LINK  $@"
 	$(CXX) $(CXXFLAGS) -O0 -g -o $@ $^
@@ -108,7 +134,8 @@ $(TEST_TARGET): $(TEST_OBJS) $(TEST_PHYSICS_OBJ)
 $(TESTBUILDDIR)/%.o: $(TESTDIR)/%.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(TESTDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(TESTDIR) \
+	    -DNAVSOLVER_TEST_DATA_DIR=\"$(CURDIR)/$(TESTDIR)\" -c $< -o $@
 
 $(TEST_PHYSICS_OBJ): $(SRCDIR)/Physics.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
@@ -119,7 +146,7 @@ $(TESTBUILDDIR):
 
 clean:
 	@echo "  CLEAN"
-	@rm -rf $(BUILDDIR) $(TARGET) $(TEST_TARGET)
+	@rm -rf $(BUILDDIR) $(TARGET) $(TEST_TARGET) $(OMP_TARGET)
 	@rm -f navsolver.log /tmp/navsolver_check.cfg
 
 # ── Dependency tracking (auto-generated) ───────────────────────────────────────

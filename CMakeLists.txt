@@ -47,6 +47,27 @@ add_custom_target(check
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# ── OpenMP variant (additive: configure still succeeds without OpenMP) ────────
+find_package(OpenMP)
+
+if(OpenMP_CXX_FOUND)
+    set(OMPSRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/openmp)
+    file(GLOB OMPSRCS "${OMPSRCDIR}/*.cpp")
+
+    add_executable(navsolver_omp ${OMPSRCS})
+
+    target_include_directories(navsolver_omp PRIVATE ${INCDIR})
+
+    target_compile_options(navsolver_omp PRIVATE
+        -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
+        -O3 -DNDEBUG -march=native -funroll-loops
+    )
+
+    target_link_libraries(navsolver_omp PRIVATE OpenMP::OpenMP_CXX)
+else()
+    message(STATUS "OpenMP not found — skipping navsolver_omp target")
+endif()
+
 # ── Unit tests ───────────────────────────────────────────────────────────────
 enable_testing()
 
@@ -61,6 +82,10 @@ target_include_directories(navsolver_tests PRIVATE
 
 target_compile_options(navsolver_tests PRIVATE
     -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
+)
+
+target_compile_definitions(navsolver_tests PRIVATE
+    NAVSOLVER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests"
 )
 
 add_test(NAME unit_tests COMMAND navsolver_tests)

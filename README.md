@@ -66,6 +66,35 @@ functions; use `make bench` (a clean `-O3` build) for that instead. See
 [`docs/serial-optimization.md`](docs/serial-optimization.md) for a full
 profiling pass with real before/after numbers.
 
+## Documentation index
+
+- [`docs/serial-optimization.md`](docs/serial-optimization.md) — gprof
+  baseline, three applied fixes (SOR pressure solve, buffer reuse, CSV
+  I/O), real before/after wall-clock numbers.
+- [`docs/roofline.md`](docs/roofline.md) — is the code compute- or
+  memory-bound? Empirically-measured peak ceilings (FMA, bandwidth,
+  `exp()` throughput) vs. achieved performance for the two hottest kernels.
+  ```bash
+  source .venv/bin/activate && pip install matplotlib   # once, for the plot
+  python3 scripts/roofline.py
+  ```
+- [`docs/serial-optimization-loop-order.md`](docs/serial-optimization-loop-order.md) —
+  acted on the roofline verdict: restructured `computeAccelerations`'s
+  X-sweep to match `GridField`'s memory layout. Golden-field regression
+  test, before/after numbers, Y-sweep not yet done.
+- [`docs/openmp-parallelization.md`](docs/openmp-parallelization.md) —
+  red-black pressure solve (needed since plain Gauss-Seidel/SOR can't be
+  parallelized as-is), per-thread scratch buffers, a real data race found
+  and fixed during verification, and real strong-scaling numbers (peak
+  ~1.2-1.3x at 2 threads, declining beyond — matches the roofline's
+  memory-bandwidth-saturation prediction).
+  ```bash
+  make openmp                                           # navsolver_omp
+  make validate-parallel                                # thread-count equivalence + determinism
+  python3 scripts/benchmark.py --binary navsolver_omp --threads 1,2,4,6,12
+  python3 scripts/plot_scaling.py <benchmark_csv>
+  ```
+
 ## Correctness checks
 
 ```bash
@@ -152,7 +181,7 @@ NavSolver/
 ├── src/                        # C++ code only
 │   ├── common/                 # Physics kernels (ONCE), config, logging, VTK
 │   ├── serial/                 # Serial CPU: AoS layout, simple loops
-│   ├── openmp/                 # (planned) OpenMP: AoS layout, #pragma omp
+│   ├── openmp/                 # OpenMP: red-black pressure solve, per-thread scratch
 │   ├── cuda/                   # (planned) CUDA: SoA layout, GPU kernels
 │   └── mpi_cuda/               # (planned) MPI+CUDA: 1D decomposition, halo exchange
 │

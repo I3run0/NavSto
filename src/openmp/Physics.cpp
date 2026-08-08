@@ -1,5 +1,5 @@
 // =============================================================================
-//  Physics.cpp  —  Navier-Stokes solver kernels.
+//  Physics.cpp  —  Navier-Stokes solver kernels (OpenMP).
 //
 //  Solves the 3-D incompressible Navier-Stokes equations:
 //
@@ -8,11 +8,18 @@
 //
 //  Method: explicit fractional-step (projection) with UNIFAES exponential
 //          scheme on a staggered Cartesian grid.
-//  Pressure: Gauss-Seidel solution of ∇²p = S.
+//  Pressure: red-black SOR solution of ∇²p = S (not plain Gauss-Seidel —
+//            see docs/openmp-parallelization.md for why).
+//
+//  Started as a full copy of src/serial/Physics.cpp (deliberately, not
+//  #ifdef-branched into the serial file — see docs/openmp-parallelization.md
+//  for that tradeoff) with computeAccelerations() and solvePressurePoisson()
+//  modified for parallelism; everything else is unchanged from serial.
 // =============================================================================
 
 #include "Physics.hpp"
 #include "Logger.hpp"
+#include "RedBlackIndexing.hpp"
 
 #include <cmath>
 #include <algorithm>
@@ -239,6 +246,108 @@ void applyVelocityBCs(SimState& s)
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Red-black solvePressurePoisson helpers.
+//
+//  The serial solver (src/serial/Physics.cpp) interleaves Neumann
+//  ghost-cell mirroring *inline*, mid-sweep, using whatever press(i,j,k)
+//  holds at that point in the single i/k/j traversal. Red-black updates
+//  cells out of that traversal order (all RED, then all BLACK), so the
+//  mirroring can't stay inline -- it's factored into its own explicit
+//  pass here, run twice per sweep (once before RED, once before BLACK):
+//  BLACK's boundary cells need to see RED's just-updated interior values
+//  reflected in the ghost layer, which a single mirror pass before both
+//  colors wouldn't provide.
+// ---------------------------------------------------------------------------
+
+/// Mirrors Neumann boundary press() values into the ghost layer for the
+/// CURRENT press field state. Periodic-Z doesn't need mirroring here --
+/// updateColor() reads wrapped k indices directly instead.
+///
+/// Deliberately LEFT SERIAL (no #pragma omp), unlike updateColor() below --
+/// found a real data race here empirically (via a determinism check:
+/// results varied run-to-run at a fixed thread count under schedule(static),
+/// which shouldn't happen if race-free) and root-caused it: the
+/// `j==jLoopS`/`j==jLoopN` writes target `press(i, j-1|j+1, k)` -- SAME row
+/// i as the writing thread -- but a DIFFERENT thread processing i+1 can
+/// ALSO write into row i via its own im=i target (`i+1 == s.iLow[j']+1`
+/// for some j'), and if that j' coincides with this thread's j-1/j+1
+/// target, two threads write the same address with different values. A
+/// prior "no two i values collide" analysis (see git history) missed this
+/// cross-thread row collision. No ThreadSanitizer available in this WSL2
+/// sandbox to verify a fix formally (same limitation as `perf`, see
+/// docs/roofline.md), so the safe choice is to not parallelize this
+/// function rather than risk a silent correctness bug -- it's cheap
+/// relative to updateColor's actual linear-algebra work, not worth the risk.
+void mirrorGhostCells(SimState& s) {
+    const auto& cfg = s.cfg;
+    for (int i = 1; i <= cfg.numCellsX; ++i) {
+        const int im = i - 1, ip = i + 1;
+        int jLoopS, jLoopN;
+        if      (s.jLow[im]  >= s.jLow[i])  jLoopS = s.jLow[i]+1;
+        else                                  jLoopS = s.jLow[i];
+        if      (s.jHigh[im] <= s.jHigh[i]) jLoopN = s.jHigh[i];
+        else                                  jLoopN = s.jHigh[i]+1;
+        if (i == s.degreeIndex2) { jLoopS = s.jLow[im]+1; jLoopN = s.jHigh[im]; }
+
+        for (int k = 1; k <= cfg.numCellsZ; ++k) {
+            for (int j = jLoopS; j <= jLoopN; ++j) {
+                if (i == 1 || i == s.iLow[j]+1)             s.press(im, j, k) = s.press(i, j, k);
+                if (i == cfg.numCellsX || i == s.iHigh[j])  s.press(ip, j, k) = s.press(i, j, k);
+                if (j == jLoopS)                             s.press(i, j-1, k) = s.press(i, j, k);
+                if (j == jLoopN)                             s.press(i, j+1, k) = s.press(i, j, k);
+                if (cfg.lateralCondition == LateralBC::SolidWall) {
+                    if (k == 1)             s.press(i, j, k-1) = s.press(i, j, k);
+                    if (k == cfg.numCellsZ) s.press(i, j, k+1) = s.press(i, j, k);
+                }
+            }
+        }
+    }
+}
+
+/// Updates every cell in `cells` (one color) — embarrassingly parallel: by
+/// construction (see RedBlackIndexing.hpp) every cell in `cells` only
+/// reads neighbors of the OTHER color, all fixed for the duration of this
+/// call. Correctness (same fixed point as the original single-sweep
+/// Gauss-Seidel/SOR, verified via scripts/validate.py's red-black tier)
+/// was established BEFORE adding the #pragma omp below -- see
+/// docs/openmp-parallelization.md for why serial-first.
+void updateColor(SimState& s, const std::vector<CellIndex>& cells,
+                  double cX, double cY, double cZ, double invDiag,
+                  int iRef, int jRef, int kRef, double pRef) {
+    const auto& cfg = s.cfg;
+    const long n = static_cast<long>(cells.size());
+    // schedule(static): deterministic at a fixed thread count (needed by
+    // scripts/validate_parallel.py's determinism check), and the per-cell
+    // cost here is uniform (no reason to prefer dynamic scheduling).
+    #pragma omp parallel for schedule(static)
+    for (long idx = 0; idx < n; ++idx) {
+        const CellIndex& cell = cells[idx];
+        const int i = cell.i, j = cell.j, k = cell.k;
+        const int im = i-1, ip = i+1, jm = j-1, jp = j+1;
+        int km = k-1, kp = k+1;
+        if (cfg.lateralCondition != LateralBC::SolidWall) {
+            if (k == 1)             km = cfg.numCellsZ;
+            if (k == cfg.numCellsZ) kp = 1;
+        }
+
+        if (i == iRef && j == jRef && k == kRef) {
+            s.press(i, j, k) = pRef;
+            continue;
+        }
+        double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
+                    + cX*(s.press(ip,j,k) + s.press(im,j,k))
+                    + cZ*(s.press(i,j,kp) + s.press(i,j,km))
+                    - s.pressureSource(i,j,k)) * invDiag;
+        if ((i==1 || i==cfg.numCellsX) && (j==s.jLow[i]+1 || j==s.jHigh[i])) {
+            pNew -= s.pressureSource(i,j,k) * invDiag;
+            if (cfg.lateralCondition == LateralBC::SolidWall && (k==1 || k==cfg.numCellsZ))
+                pNew -= 2.0 * s.pressureSource(i,j,k) * invDiag;
+        }
+        s.press(i, j, k) += cfg.sorOmega * (pNew - s.press(i, j, k));
+    }
+}
+
 } // anonymous namespace
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -431,35 +540,53 @@ void computeAccelerations(SimState& s)
     s.accelY.fill(0.0);
     s.accelZ.fill(0.0);
 
-    // Temporary 1‑D arrays (logical index -1 .. maxDim+1) offset by +1.
-    // Sized maxDim+3 (not maxDim+2) in SimState::allocateFields(): several
-    // writes below reach logical index maxDim+1 (e.g. VM(ppiw, i+2) at
-    // i==iEnd-1==maxDim-1, and the VM(Ku, iEnd+1)/VM(Ku, jEnd+1)/
-    // VM(Ku, numCellsZ+1) boundary extrapolations), which needs physical
-    // slot maxDim+2. Owned by SimState and reused across calls instead of
-    // being allocated fresh every call — see the field comments there for
-    // why that's safe without re-zeroing.
-    auto& ppin = s.ppin; auto& ppis = s.ppis;
-    auto& ppiu = s.ppiu; auto& ppid = s.ppid;
-    auto& qsin = s.qsin; auto& qsiu = s.qsiu;
-    auto& Ku = s.Ku; auto& Kv = s.Kv; auto& Kw = s.Kw;
-
-    // X-sweep-only 2-D (i,k) scratch — see SimState.hpp field comments and
-    // docs/serial-optimization-loop-order.md. Replaces the 1-D
-    // ppie/ppiw/qsie buffers (and this sweep's private use of Ku/Kv/Kw,
-    // which the Y/Z sweeps below still use in their original 1-D form).
-    auto& ppieXK = s.ppieXK; auto& ppiwXK = s.ppiwXK; auto& qsieXK = s.qsieXK;
-    auto& KuXK = s.KuXK; auto& KvXK = s.KvXK; auto& KwXK = s.KwXK;
-
-    // Helper to access offset arrays (logical idx -> physical idx+1)
-    auto VM = [](std::vector<double>& v, int idx) -> double& { return v[idx+1]; };
+    // Helper to access offset arrays (logical idx -> physical idx+1). Takes
+    // a raw double* (not std::vector<double>&) so it works uniformly on
+    // whatever per-thread slice pointer each thread sets up below.
+    auto VM = [](double* v, int idx) -> double& { return v[idx+1]; };
 
     // Same offset convention as VM, but for the X-sweep's 2-D (i,k) scratch:
     // logical i -> physical i+1 (as VM), k (1..KKfim) -> physical k-1.
     const int kStride = s.scratchKLen;
-    auto VM2 = [kStride](std::vector<double>& v, int iLogical, int k) -> double& {
+    auto VM2 = [kStride](double* v, int iLogical, int k) -> double& {
         return v[static_cast<std::size_t>(iLogical + 1) * kStride + (k - 1)];
     };
+
+    // computeAccelerations() scratch buffers are SimState-owned (sized once
+    // in allocateFields(), not std::vector-allocated fresh every call — see
+    // the field comments there) but PER-THREAD: each sweep below is
+    // parallelized over its outer loop (#pragma omp for), and every thread
+    // needs its own private slice of these buffers -- concurrent threads
+    // writing the SAME shared buffer would race. Each thread computes its
+    // own slice pointers once at the top of this parallel region (not
+    // per-outer-loop-iteration) and reuses them for all three sweeps.
+    #pragma omp parallel
+    {
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num();
+#else
+        const int tid = 0;
+#endif
+        double* ppin = s.ppin.data() + tid * s.scratchLenPerThread;
+        double* ppis = s.ppis.data() + tid * s.scratchLenPerThread;
+        double* ppiu = s.ppiu.data() + tid * s.scratchLenPerThread;
+        double* ppid = s.ppid.data() + tid * s.scratchLenPerThread;
+        double* qsin = s.qsin.data() + tid * s.scratchLenPerThread;
+        double* qsiu = s.qsiu.data() + tid * s.scratchLenPerThread;
+        double* Ku   = s.Ku.data()   + tid * s.scratchLenPerThread;
+        double* Kv   = s.Kv.data()   + tid * s.scratchLenPerThread;
+        double* Kw   = s.Kw.data()   + tid * s.scratchLenPerThread;
+
+        // X-sweep-only 2-D (i,k) scratch — see SimState.hpp field comments
+        // and docs/serial-optimization-loop-order.md. Replaces the 1-D
+        // ppie/ppiw/qsie buffers (and this sweep's private use of Ku/Kv/Kw,
+        // which the Y/Z sweeps below still use in their own 1-D slices).
+        double* ppieXK = s.ppieXK.data() + tid * s.xk2DLenPerThread;
+        double* ppiwXK = s.ppiwXK.data() + tid * s.xk2DLenPerThread;
+        double* qsieXK = s.qsieXK.data() + tid * s.xk2DLenPerThread;
+        double* KuXK   = s.KuXK.data()   + tid * s.xk2DLenPerThread;
+        double* KvXK   = s.KvXK.data()   + tid * s.xk2DLenPerThread;
+        double* KwXK   = s.KwXK.data()   + tid * s.xk2DLenPerThread;
 
     // ---------- Direction X ----------
     // Restructured (docs/serial-optimization-loop-order.md) to loop
@@ -475,6 +602,13 @@ void computeAccelerations(SimState& s)
     // tests/serial/GoldenFieldTest.cpp (captured from the pre-restructuring
     // implementation).
     const double invDx2 = 1.0 / (cfg.cellSizeX * cfg.cellSizeX);
+    // Parallel over j: each j-plane's 5-pass computation is self-contained
+    // (uses only this thread's private scratch slice), so different j
+    // values can run on different threads with no cross-thread dependency.
+    // schedule(static) for deterministic results at a fixed thread count
+    // (needed by scripts/validate_parallel.py's determinism check) and
+    // because the per-plane cost is fairly uniform for this geometry.
+    #pragma omp for schedule(static)
     for (int j = 1; j <= s.numCellsYm1; ++j) {
         const int iStart = s.iLow[j];
         const int iEnd   = s.iHigh[j];
@@ -548,6 +682,9 @@ void computeAccelerations(SimState& s)
 
     // ---------- Direction Y ----------
     const double invDy2 = 1.0 / (cfg.cellSizeY * cfg.cellSizeY);
+    // Parallel over i -- same reasoning as the X-sweep's #pragma omp for
+    // above, just over the Y-sweep's outer dimension instead.
+    #pragma omp for schedule(static)
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int jStart = s.jLow[i];
         const int jEnd   = s.jHigh[i];
@@ -603,6 +740,12 @@ void computeAccelerations(SimState& s)
 
     // ---------- Direction Z ----------
     const double invDz2 = 1.0 / (cfg.cellSizeZ * cfg.cellSizeZ);
+    // Parallel over i -- same reasoning as the X/Y sweeps' #pragma omp for
+    // above. Implicit barrier at the end of this omp-for (no `nowait`) is
+    // required: this is the last sweep before the parallel region closes,
+    // and the code after it (periodic Z copy, outside this region) reads
+    // accelX/Y/Z that all three sweeps wrote.
+    #pragma omp for schedule(static)
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const double invRe = effectiveInvRe(s, i);
         const double localRe = 1.0 / invRe;
@@ -662,8 +805,10 @@ void computeAccelerations(SimState& s)
             }
         }
     }
+    } // end #pragma omp parallel
 
-    // Periodic copy in z
+    // Periodic copy in z (cheap, O(N^(2/3)) -- left serial rather than
+    // parallelized inside the region above)
     if (periodic) {
         for (int i = 1; i <= s.numCellsXm1; ++i)
             for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
@@ -741,7 +886,18 @@ void buildPressureSource(SimState& s)
 }
 
 // ---------------------------------------------------------------------------
-//  solvePressurePoisson — Gauss-Seidel for ∇²p = S
+//  solvePressurePoisson — red-black SOR for ∇²p = S
+//
+//  The serial solver's plain Gauss-Seidel/SOR has a genuine loop-carried
+//  dependency (each cell reads a same-sweep-updated neighbor), which can't
+//  be correctly parallelized as-is. Red-black splits cells by (i+j+k)
+//  parity so each color's update is embarrassingly parallel -- see
+//  RedBlackIndexing.hpp and mirrorGhostCells()/updateColor() above.
+//  Converges to the SAME fixed point as the serial version via a
+//  DIFFERENT iteration path (not identical intermediate values) --
+//  verified via scripts/validate.py's red-black tier, not a golden-field
+//  diff. NOT parallelized yet (no #pragma omp in updateColor) --
+//  serial-first, per docs/openmp-parallelization.md.
 // ---------------------------------------------------------------------------
 void solvePressurePoisson(SimState& s)
 {
@@ -757,56 +913,16 @@ void solvePressurePoisson(SimState& s)
     const int kRef = (cfg.numCellsZ + 1) / 2;
     const double pRef = s.press(iRef, jRef, kRef);
 
+    if (!s.redBlackBuilt) {
+        buildRedBlackIndices(s);
+        s.redBlackBuilt = true;
+    }
+
     for (int sweep = 0; sweep < cfg.numPressureIter; ++sweep) {
-        for (int i = 1; i <= cfg.numCellsX; ++i) {
-            const int im = i-1, ip = i+1;
-            int jLoopS, jLoopN;
-            if      (s.jLow[im]  >= s.jLow[i])  jLoopS = s.jLow[i]+1;
-            else                                  jLoopS = s.jLow[i];
-            if      (s.jHigh[im] <= s.jHigh[i]) jLoopN = s.jHigh[i];
-            else                                  jLoopN = s.jHigh[i]+1;
-            if (i == s.degreeIndex2) { jLoopS = s.jLow[im]+1; jLoopN = s.jHigh[im]; }
-
-            for (int k = 1; k <= cfg.numCellsZ; ++k) {
-                int km = k-1, kp = k+1;
-                for (int j = jLoopS; j <= jLoopN; ++j) {
-                    const int jm = j-1, jp = j+1;
-
-                    // Neumann ghost-cell mirroring
-                    if (i == 1 || i == s.iLow[j]+1)             s.press(im, j, k) = s.press(i, j, k);
-                    if (i == cfg.numCellsX || i == s.iHigh[j])  s.press(ip, j, k) = s.press(i, j, k);
-                    if (j == jLoopS)                             s.press(i, jm, k) = s.press(i, j, k);
-                    if (j == jLoopN)                             s.press(i, jp, k) = s.press(i, j, k);
-                    if (cfg.lateralCondition == LateralBC::SolidWall) {
-                        if (k == 1)            s.press(i, j, km) = s.press(i, j, k);
-                        if (k == cfg.numCellsZ) s.press(i, j, kp) = s.press(i, j, k);
-                    } else {
-                        if (k == 1)            km = cfg.numCellsZ;
-                        if (k == cfg.numCellsZ) kp = 1;
-                    }
-
-                    if (i == iRef && j == jRef && k == kRef) {
-                        s.press(i, j, k) = pRef;
-                    } else {
-                        double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
-                                    + cX*(s.press(ip,j,k) + s.press(im,j,k))
-                                    + cZ*(s.press(i,j,kp) + s.press(i,j,km))
-                                    - s.pressureSource(i,j,k)) * invDiag;
-                        // Corner correction
-                        if ((i==1 || i==cfg.numCellsX) && (j==s.jLow[i]+1 || j==s.jHigh[i])) {
-                            pNew -= s.pressureSource(i,j,k) * invDiag;
-                            if (cfg.lateralCondition == LateralBC::SolidWall && (k==1 || k==cfg.numCellsZ))
-                                pNew -= 2.0 * s.pressureSource(i,j,k) * invDiag;
-                        }
-                        // SOR: over-relax the Gauss-Seidel update (omega=1
-                        // reduces to plain Gauss-Seidel) — same per-cell
-                        // cost, converges to the same fixed point in fewer
-                        // sweeps.
-                        s.press(i, j, k) += cfg.sorOmega * (pNew - s.press(i, j, k));
-                    }
-                }
-            }
-        }
+        mirrorGhostCells(s);
+        updateColor(s, s.redCells, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
+        mirrorGhostCells(s);
+        updateColor(s, s.blackCells, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
     }
 }
 
