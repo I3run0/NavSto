@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 project(NavSolver LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -66,6 +66,49 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(navsolver_omp PRIVATE OpenMP::OpenMP_CXX)
 else()
     message(STATUS "OpenMP not found — skipping navsolver_omp target")
+endif()
+
+# ── CUDA variant (additive, CMake-only per docs/cuda-port.md — configure
+#    still succeeds without a CUDA toolchain). Deliberately asymmetric with
+#    the OpenMP target above: CUDA needs enable_language(CUDA) + mixed
+#    C++/CUDA linking, which CMake handles natively; the hand-rolled
+#    Makefile would have to reimplement that, so CUDA is CMake-only. ────────
+include(CheckLanguage)
+check_language(CUDA)
+
+if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+
+    set(CUDASRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+    file(GLOB CUDASRCS "${CUDASRCDIR}/*.cu")
+
+    # Reuses src/serial/Physics.cpp AS-IS for initSimulation() (host-only
+    # geometry/IC setup, not a per-step hot path) and the other CPU
+    # implementations it defines under their original (non-Cuda-suffixed)
+    # names -- no symbol clash with Physics.cu's *Cuda-suffixed wrappers,
+    # and those CPU implementations simply go unused/unlinked-away rather
+    # than needing to be re-derived. See src/cuda/main.cu.
+    add_executable(navsolver_cuda ${CUDASRCS} ${SRCDIR}/Physics.cpp)
+
+    target_include_directories(navsolver_cuda PRIVATE ${INCDIR} ${CUDASRCDIR})
+
+    # sm_86: this machine's GPU specifically (NVIDIA GeForce MX570 A,
+    # Compute Capability 8.6) -- deliberately narrow, not a generic
+    # multi-arch build. See docs/cuda-port.md.
+    set_target_properties(navsolver_cuda PROPERTIES
+        CUDA_ARCHITECTURES 86
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+    )
+
+    target_compile_options(navsolver_cuda PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter -O3 -DNDEBUG>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 -DNDEBUG>
+    )
+
+    message(STATUS "CUDA compiler found (${CMAKE_CUDA_COMPILER}) — building navsolver_cuda for sm_86")
+else()
+    message(STATUS "No CUDA compiler found — skipping navsolver_cuda target")
 endif()
 
 # ── Unit tests ───────────────────────────────────────────────────────────────

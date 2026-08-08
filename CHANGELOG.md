@@ -10,6 +10,35 @@ under `[Unreleased]`.
 ## [Unreleased]
 
 ### Added
+- `src/cuda/` (CMake-only target `navsolver_cuda`, `CUDA_ARCHITECTURES 86`
+  for this machine's MX570 specifically) — full CUDA port of the per-step
+  loop, not just the two hot kernels: `computeAccelerations` (one thread
+  per plane, sequential recurrence kept inside the thread along the sweep
+  axis) and `solvePressurePoisson` (one thread per active cell of one
+  color, reusing `RedBlackIndexing.hpp` unchanged) plus device kernels for
+  `buildPressureSource`, `updateVelocities`, `computeMomentumResidual`,
+  `computeDivergence`, and `adaptTimeStep` (via `thrust` reductions) so the
+  whole loop stays GPU-resident between VTK snapshots.
+  `mirrorGhostCells` is launched `<<<1,1>>>` (deliberately single-threaded)
+  — parallelizing it naively reproduces the exact cross-row/same-row race
+  `docs/openmp-parallelization.md` found on the CPU, and no race detector
+  was available here to verify a fix, so it stays serial-but-correct on
+  the device (no D2H/H2D round trip) rather than risk a silent GPU bug.
+  **Correctness** (`scripts/validate_cuda.py`, mirroring
+  `scripts/validate_parallel.py`'s structure): gauge-fixed red-black
+  equivalence vs serial gives `L2_rel=1.152e-03` — matching OpenMP's own
+  `1.15e-3` almost exactly, a strong independent cross-check — and
+  determinism (run twice, same config) is bit-identical (`L2_rel=0.0`).
+  `make test` and `scripts/validate.py` stay green throughout.
+  **Performance, honestly reported as a negative result**: CUDA is
+  **5.9×-18.6× slower than serial** across the grid sizes and sweep counts
+  tested — isolated to `mirrorGhostCells`'s single-thread kernel (10× more
+  pressure sweeps made CUDA ~4.2× slower vs serial's own 2.1×, the clearest
+  signature of a serial-bottleneck-dominated GPU kernel), compounded by an
+  entry-level laptop dGPU (MX570 A, 16 SMs) far smaller than this workload
+  class is normally run on. Full writeup, numbers, and future-work list
+  (parallelizing `mirrorGhostCells` correctly is the clear next lever) in
+  `docs/cuda-port.md`.
 - `src/openmp/` (copy of `src/serial/`, build wired via `make openmp` and
   CMake's `find_package(OpenMP)`-guarded `navsolver_omp` target) +
   `src/common/RedBlackIndexing.hpp` — red-black restructuring of
