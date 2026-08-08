@@ -264,23 +264,50 @@ void applyVelocityBCs(SimState& s)
 /// CURRENT press field state. Periodic-Z doesn't need mirroring here --
 /// updateColor() reads wrapped k indices directly instead.
 ///
-/// Deliberately LEFT SERIAL (no #pragma omp), unlike updateColor() below --
-/// found a real data race here empirically (via a determinism check:
-/// results varied run-to-run at a fixed thread count under schedule(static),
-/// which shouldn't happen if race-free) and root-caused it: the
-/// `j==jLoopS`/`j==jLoopN` writes target `press(i, j-1|j+1, k)` -- SAME row
-/// i as the writing thread -- but a DIFFERENT thread processing i+1 can
-/// ALSO write into row i via its own im=i target (`i+1 == s.iLow[j']+1`
-/// for some j'), and if that j' coincides with this thread's j-1/j+1
-/// target, two threads write the same address with different values. A
-/// prior "no two i values collide" analysis (see git history) missed this
-/// cross-thread row collision. No ThreadSanitizer available in this WSL2
-/// sandbox to verify a fix formally (same limitation as `perf`, see
-/// docs/roofline.md), so the safe choice is to not parallelize this
-/// function rather than risk a silent correctness bug -- it's cheap
-/// relative to updateColor's actual linear-algebra work, not worth the risk.
+/// v1 of this function (see git history) was fully serial: an earlier
+/// attempt at `#pragma omp parallel for` on the `i` loop hit a real data
+/// race, found via a determinism check (results varied run-to-run at a
+/// fixed thread count under schedule(static), which shouldn't happen if
+/// race-free): the `j==jLoopS`/`j==jLoopN` writes target
+/// `press(i, j-1|j+1, k)` -- SAME row i as the writing thread -- but a
+/// DIFFERENT thread processing i+1 can ALSO write into row i via its own
+/// im=i target (`i+1 == s.iLow[j']+1` for some j'), and if that j'
+/// coincides with this thread's j-1/j+1 target, two threads write the same
+/// address with different values.
+///
+/// v2 (this version) separates the two write categories into two passes
+/// with a barrier between (the implicit barrier at the end of the first
+/// `#pragma omp for`, since neither loop uses `nowait`):
+///   Pass A -- only the im/ip (cross-row) writes, which target row i-1 or
+///             i+1, NEVER row i itself.
+///   Pass B -- only the same-row writes (j-extension and, for SolidWall,
+///             the k ghost layer), which by construction only ever target
+///             (i, ...) -- this thread's OWN row -- so once Pass A has
+///             fully completed (guaranteed by the barrier), no other
+///             thread can still be writing into row i and Pass B is
+///             race-free.
+/// (Pass A itself has no cross-thread collision either: two different i's
+/// im/ip writes could only target the same neighbor row if some row j had
+/// iLow[j] > iHigh[j], i.e. an inverted/empty active span, which doesn't
+/// happen for a valid active row -- same reasoning the original,
+/// incomplete race analysis already relied on, see git history.)
+///
+/// MUST be called from inside an enclosing `#pragma omp parallel` region
+/// (see solvePressurePoisson) -- both `#pragma omp for` below are orphaned
+/// worksharing constructs, standard OpenMP, bind to whatever team is
+/// currently active.
+///
+/// No ThreadSanitizer available in this WSL2 sandbox to verify formally
+/// (same limitation as `perf`, see docs/roofline.md), so this was verified
+/// with the SAME determinism methodology that caught the original race:
+/// OMP_NUM_THREADS=12, config run 5 times, DilMax bit-identical every run,
+/// matching the 1-thread/serial reference -- see
+/// docs/openmp-parallelization.md for the actual run log.
 void mirrorGhostCells(SimState& s) {
     const auto& cfg = s.cfg;
+
+    // Pass A: cross-row writes only (into row i-1 or i+1, never row i).
+    #pragma omp for schedule(static)
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         const int im = i - 1, ip = i + 1;
         int jLoopS, jLoopN;
@@ -294,6 +321,24 @@ void mirrorGhostCells(SimState& s) {
             for (int j = jLoopS; j <= jLoopN; ++j) {
                 if (i == 1 || i == s.iLow[j]+1)             s.press(im, j, k) = s.press(i, j, k);
                 if (i == cfg.numCellsX || i == s.iHigh[j])  s.press(ip, j, k) = s.press(i, j, k);
+            }
+        }
+    }
+    // implicit barrier here -- no nowait on the #pragma omp for above.
+
+    // Pass B: same-row writes only (into row i itself).
+    #pragma omp for schedule(static)
+    for (int i = 1; i <= cfg.numCellsX; ++i) {
+        const int im = i - 1;
+        int jLoopS, jLoopN;
+        if      (s.jLow[im]  >= s.jLow[i])  jLoopS = s.jLow[i]+1;
+        else                                  jLoopS = s.jLow[i];
+        if      (s.jHigh[im] <= s.jHigh[i]) jLoopN = s.jHigh[i];
+        else                                  jLoopN = s.jHigh[i]+1;
+        if (i == s.degreeIndex2) { jLoopS = s.jLow[im]+1; jLoopN = s.jHigh[im]; }
+
+        for (int k = 1; k <= cfg.numCellsZ; ++k) {
+            for (int j = jLoopS; j <= jLoopN; ++j) {
                 if (j == jLoopS)                             s.press(i, j-1, k) = s.press(i, j, k);
                 if (j == jLoopN)                             s.press(i, j+1, k) = s.press(i, j, k);
                 if (cfg.lateralCondition == LateralBC::SolidWall) {
@@ -305,46 +350,64 @@ void mirrorGhostCells(SimState& s) {
     }
 }
 
-/// Updates every cell in `cells` (one color) — embarrassingly parallel: by
-/// construction (see RedBlackIndexing.hpp) every cell in `cells` only
-/// reads neighbors of the OTHER color, all fixed for the duration of this
-/// call. Correctness (same fixed point as the original single-sweep
-/// Gauss-Seidel/SOR, verified via scripts/validate.py's red-black tier)
-/// was established BEFORE adding the #pragma omp below -- see
-/// docs/openmp-parallelization.md for why serial-first.
-void updateColor(SimState& s, const std::vector<CellIndex>& cells,
+enum class RBColor { Red, Black };
+
+/// Updates every cell of one color across all active rows — embarrassingly
+/// parallel: by construction every cell of `color` only reads neighbors of
+/// the OTHER color, all fixed for the duration of this call. Correctness
+/// (same fixed point as the original single-sweep Gauss-Seidel/SOR,
+/// verified via scripts/validate.py's red-black tier) was established
+/// BEFORE adding the #pragma omp below -- see docs/openmp-parallelization.md
+/// for why serial-first.
+///
+/// MUST be called from inside an enclosing `#pragma omp parallel` region
+/// (see solvePressurePoisson) -- the `#pragma omp for` below is an
+/// orphaned worksharing construct, standard OpenMP, binds to whatever team
+/// is currently active. Iterates s.activeRows (one (i,j) row list drives
+/// BOTH colors -- see RedBlackIndexing.hpp) with a direct strided inner
+/// k-loop instead of dereferencing a per-cell index list: replaces a
+/// gather (defeats prefetching) with unit-stride-2 access, which is what
+/// the roofline's "5% of bandwidth ceiling despite low AI" finding pointed
+/// at (latency-bound via indirection, not bandwidth-bound).
+void updateColor(SimState& s, RBColor color,
                   double cX, double cY, double cZ, double invDiag,
                   int iRef, int jRef, int kRef, double pRef) {
     const auto& cfg = s.cfg;
-    const long n = static_cast<long>(cells.size());
+    const long n = static_cast<long>(s.activeRows.size());
+    const int wantParity = (color == RBColor::Red) ? 0 : 1;
     // schedule(static): deterministic at a fixed thread count (needed by
-    // scripts/validate_parallel.py's determinism check), and the per-cell
-    // cost here is uniform (no reason to prefer dynamic scheduling).
-    #pragma omp parallel for schedule(static)
+    // scripts/validate_parallel.py's determinism check). Per-row cost is
+    // uniform (~numCellsZ/2 cells each), no reason to prefer dynamic.
+    #pragma omp for schedule(static)
     for (long idx = 0; idx < n; ++idx) {
-        const CellIndex& cell = cells[idx];
-        const int i = cell.i, j = cell.j, k = cell.k;
+        const int i = s.activeRows[idx].i;
+        const int j = s.activeRows[idx].j;
         const int im = i-1, ip = i+1, jm = j-1, jp = j+1;
-        int km = k-1, kp = k+1;
-        if (cfg.lateralCondition != LateralBC::SolidWall) {
-            if (k == 1)             km = cfg.numCellsZ;
-            if (k == cfg.numCellsZ) kp = 1;
-        }
+        // (i+j+k) even => red. kStart is the smallest k in [1,2] with the
+        // right (i+j+k) parity for this color; step 2 covers the rest.
+        const int kStart = (((i + j) % 2) == wantParity) ? 2 : 1;
+        for (int k = kStart; k <= cfg.numCellsZ; k += 2) {
+            int km = k-1, kp = k+1;
+            if (cfg.lateralCondition != LateralBC::SolidWall) {
+                if (k == 1)             km = cfg.numCellsZ;
+                if (k == cfg.numCellsZ) kp = 1;
+            }
 
-        if (i == iRef && j == jRef && k == kRef) {
-            s.press(i, j, k) = pRef;
-            continue;
+            if (i == iRef && j == jRef && k == kRef) {
+                s.press(i, j, k) = pRef;
+                continue;
+            }
+            double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
+                        + cX*(s.press(ip,j,k) + s.press(im,j,k))
+                        + cZ*(s.press(i,j,kp) + s.press(i,j,km))
+                        - s.pressureSource(i,j,k)) * invDiag;
+            if ((i==1 || i==cfg.numCellsX) && (j==s.jLow[i]+1 || j==s.jHigh[i])) {
+                pNew -= s.pressureSource(i,j,k) * invDiag;
+                if (cfg.lateralCondition == LateralBC::SolidWall && (k==1 || k==cfg.numCellsZ))
+                    pNew -= 2.0 * s.pressureSource(i,j,k) * invDiag;
+            }
+            s.press(i, j, k) += cfg.sorOmega * (pNew - s.press(i, j, k));
         }
-        double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
-                    + cX*(s.press(ip,j,k) + s.press(im,j,k))
-                    + cZ*(s.press(i,j,kp) + s.press(i,j,km))
-                    - s.pressureSource(i,j,k)) * invDiag;
-        if ((i==1 || i==cfg.numCellsX) && (j==s.jLow[i]+1 || j==s.jHigh[i])) {
-            pNew -= s.pressureSource(i,j,k) * invDiag;
-            if (cfg.lateralCondition == LateralBC::SolidWall && (k==1 || k==cfg.numCellsZ))
-                pNew -= 2.0 * s.pressureSource(i,j,k) * invDiag;
-        }
-        s.press(i, j, k) += cfg.sorOmega * (pNew - s.press(i, j, k));
     }
 }
 
@@ -896,8 +959,21 @@ void buildPressureSource(SimState& s)
 //  Converges to the SAME fixed point as the serial version via a
 //  DIFFERENT iteration path (not identical intermediate values) --
 //  verified via scripts/validate.py's red-black tier, not a golden-field
-//  diff. NOT parallelized yet (no #pragma omp in updateColor) --
-//  serial-first, per docs/openmp-parallelization.md.
+//  diff.
+//
+//  One #pragma omp parallel region wraps the ENTIRE sweep loop (all
+//  numPressureIter sweeps), not one region per updateColor() call. The
+//  first version of this function opened/closed a thread team on every
+//  single updateColor() call -- 2 colors x numPressureIter sweeps = 10
+//  team spawn/joins per solve at the default numPressureIter=5, every
+//  single timestep. That fixed per-spawn overhead doesn't scale with grid
+//  size, which is a plausible driver of the originally-measured
+//  small-grid-regresses-at-high-thread-count scaling (see
+//  docs/openmp-parallelization.md's Performance section, pre-this-change
+//  numbers). mirrorGhostCells() is now ALSO parallel internally (two-pass,
+//  see its own comment above) -- called directly by every thread here
+//  (not wrapped in `#pragma omp single`), its own `#pragma omp for`
+//  passes provide the necessary synchronization.
 // ---------------------------------------------------------------------------
 void solvePressurePoisson(SimState& s)
 {
@@ -918,11 +994,14 @@ void solvePressurePoisson(SimState& s)
         s.redBlackBuilt = true;
     }
 
-    for (int sweep = 0; sweep < cfg.numPressureIter; ++sweep) {
-        mirrorGhostCells(s);
-        updateColor(s, s.redCells, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
-        mirrorGhostCells(s);
-        updateColor(s, s.blackCells, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
+    #pragma omp parallel
+    {
+        for (int sweep = 0; sweep < cfg.numPressureIter; ++sweep) {
+            mirrorGhostCells(s);
+            updateColor(s, RBColor::Red, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
+            mirrorGhostCells(s);
+            updateColor(s, RBColor::Black, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
+        }
     }
 }
 

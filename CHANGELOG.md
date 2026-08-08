@@ -10,6 +10,38 @@ under `[Unreleased]`.
 ## [Unreleased]
 
 ### Added
+- **OpenMP round-2 tuning**: replaced the red-black pressure solve's
+  per-cell `CellIndex` index-list gather (`s.redCells`/`s.blackCells`) with
+  a single `s.activeRows` row list (`RowIndex{i,j}`) plus a direct strided
+  inner `k`-loop (`RedBlackIndexing.hpp`, `src/openmp/Physics.cpp`) —
+  motivated by the roofline's finding that `solvePressurePoisson` achieved
+  only ~5% of its bandwidth ceiling despite low arithmetic intensity, the
+  signature of latency-bound (gather) rather than bandwidth-bound
+  execution. Fused `solvePressurePoisson`'s per-`updateColor`-call
+  `#pragma omp parallel for` (10 team spawn/joins per solve at the default
+  `numPressureIter=5`) into one `#pragma omp parallel` region spanning the
+  whole sweep loop. **Successfully parallelized `mirrorGhostCells`**,
+  previously left serial after round 1 found a real data race there — the
+  fix splits it into two `#pragma omp for` passes separated by an implicit
+  barrier (cross-row writes, then same-row writes, which are then provably
+  race-free), verified with the same determinism methodology that caught
+  the original race (`OMP_NUM_THREADS=12`, 5 repeated runs, byte-for-byte
+  identical CSV/VTK output, not just a logged scalar) plus a fresh
+  ASan/UBSan/leak build. Checked (but did not force) vectorization via
+  `-fopt-info-vec`: `updateColor`'s inner loop doesn't auto-vectorize due
+  to genuine, correctness-load-bearing control flow (reference-pressure
+  pin, Neumann corner correction), not a fixable compiler hint — flagged,
+  not changed. All of `make test`, `scripts/validate.py`, and
+  `scripts/validate_parallel.py` stayed green throughout; red-black-vs-
+  serial `L2_rel` is bit-identical to round 1's `1.152e-03`. Performance
+  numbers are honestly caveated: both this round's and round 1's benchmark
+  captures ran under sustained, unrelated CPU contention on the shared
+  machine, making 8/12-thread numbers unreliable, but the 1-thread
+  before/after ratio (no OpenMP-overhead confound) shows a consistent
+  1.18x-1.60x wall-clock improvement across all four grid sizes — real
+  evidence the gather removal helped. Full writeup, numbers, and the
+  contention caveat in `docs/openmp-parallelization.md`'s "Round 2"
+  section.
 - `src/openmp/` (copy of `src/serial/`, build wired via `make openmp` and
   CMake's `find_package(OpenMP)`-guarded `navsolver_omp` target) +
   `src/common/RedBlackIndexing.hpp` — red-black restructuring of

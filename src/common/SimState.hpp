@@ -26,13 +26,18 @@
     #endif
 
     // ---------------------------------------------------------------------------
-    //  A single (i,j,k) cell reference — used by red-black indexing
-    //  (RedBlackIndexing.hpp) for the OpenMP/CUDA pressure-solve kernels.
+    //  A single (i,j) active-row reference — used by red-black indexing
+    //  (RedBlackIndexing.hpp) for the OpenMP pressure-solve kernel. One row
+    //  covers the FULL k in [1,numCellsZ] span (never k-masked), so a row
+    //  plus a color is enough to derive that color's k-stride directly
+    //  (kStart = ((i+j)%2==0) ? 2:1 for red, the opposite for black) instead
+    //  of materializing a per-cell index list -- see RedBlackIndexing.hpp
+    //  for why (a per-cell list is a gather that defeats prefetching).
     //  Defined here (not in RedBlackIndexing.hpp) so SimState can hold the
-    //  built index lists without RedBlackIndexing.hpp and SimState.hpp
+    //  built row list without RedBlackIndexing.hpp and SimState.hpp
     //  including each other.
     // ---------------------------------------------------------------------------
-    struct CellIndex { int i, j, k; };
+    struct RowIndex { int i, j; };
 
     // ---------------------------------------------------------------------------
     //  Condition enumerations — replaces fragile string comparisons like "prd".
@@ -200,11 +205,13 @@
         int scratchKLen = 0;          // k-stride within one thread's (i,k) slice
         int xk2DLenPerThread = 0;     // one thread's slice length for the XK buffers above
 
-        // ── Red-black pressure-solve indexing (OpenMP/CUDA only) ────────────────────
+        // ── Red-black pressure-solve indexing (OpenMP only) ─────────────────────────
         // Built once (RedBlackIndexing.hpp::buildRedBlackIndices, lazily on
         // first use) and reused for the whole run -- geometry is fixed
-        // after initSimulation(). Unused (empty) by the serial solver.
-        std::vector<CellIndex> redCells, blackCells;
+        // after initSimulation(). Unused (empty) by the serial solver. One
+        // row list drives BOTH colors (see RowIndex above) instead of two
+        // separate per-cell lists.
+        std::vector<RowIndex> activeRows;
         bool redBlackBuilt = false;
 
         // ── Log / output ───────────────────────────────────────────────────────────
