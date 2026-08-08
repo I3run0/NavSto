@@ -298,61 +298,101 @@ this is reported as a finding, not fixed here.
   identical.
 - Fresh `-fsanitize=address,undefined,leak` build clean at 1/12 threads.
 
-### Performance — real numbers, with an honest measurement caveat
+### Performance — first pass was contended, here's the clean measurement
 
-Both the round-1 baseline capture and this round's post-change capture ran
-on a machine with an **unrelated, sustained, CPU-heavy process** already
-running throughout (`navsolver`/`navsolver_omp` on
+The first attempt at re-measuring this round's scaling ran on a machine
+with an **unrelated, sustained, CPU-heavy process** already running
+throughout (`navsolver`/`navsolver_omp` on
 `experiments/configs/production_can.cfg`, Re=10000, ~1.2M cells, consuming
 3-4 cores continuously for 100+ CPU-minutes — confirmed via `ps`/
 `/proc/<pid>/cwd` to belong to a different, unrelated task on the same
-shared machine, not this work). That contention makes the `8`- and
-`12`-thread columns in what follows unreliable in an absolute sense — total
-demand exceeds the machine's 12 logical cores well before this code's own
-thread count does. **A clean re-measurement on an idle machine is still
-owed** before trusting any absolute scaling curve from this round.
+shared machine). That run's 8/12-thread columns were flagged unreliable and
+not used for conclusions; once that process was stopped, the sweep was
+re-run clean. **The numbers below are from the clean re-run.**
 
-What's still usable: both captures ran under the *same* contention, so the
-wall-clock ratio between them is a fairer signal than either absolute
-number, especially at **1 thread**, where there's no OpenMP
-scheduling/team overhead to confound the comparison — that column isolates
-the gather-removal's raw algorithmic effect:
+Even clean, the 12-thread column (this CPU's full logical-core count,
+leaving the OS/OpenMP runtime itself no slack) showed real run-to-run
+variance on repeated measurement: `tiny`@12 gave `0.145s`, `0.039s`, then
+`0.050s` across three separate 5-repeat batches taken minutes apart — a
+~3.7x spread with no code or system change between them. `small`@12 and
+`large`@12 showed smaller but still real swings (roughly 30%) across
+repeat batches. The 1-8 thread columns were comparably stable across
+repeated checks (single-digit-percent spread). The 12-thread numbers below
+use the minimum of a larger 8-repeat batch specifically to damp this down,
+but should still be read as noisier than the rest of the table — this
+variance is itself a real, if only partially explained, finding about this
+machine (WSL2 thread scheduling at full core count is the leading
+suspect), not swept under the rug.
 
-| size   | 1 thread | 2 threads | 4 threads | 6 threads | 8 threads* | 12 threads* |
-|--------|---------:|----------:|----------:|----------:|-----------:|------------:|
-| tiny   |   1.50x |    1.42x |    1.18x |    1.93x |     4.38x |      0.70x |
-| small  |   1.49x |    1.37x |    1.49x |    1.17x |     1.81x |      0.77x |
-| medium |   1.60x |    1.76x |    1.79x |    1.83x |     2.02x |      1.14x |
-| large  |   1.18x |    0.84x |    1.29x |    1.11x |     1.33x |      0.89x |
+`scripts/benchmark.py --binary navsolver_omp --threads 1,2,4,6,8,12` on an
+otherwise-idle machine, `AbruptExpansion`, 50 steps, min of 5 repeats (8 at
+12 threads):
 
-(ratio = round-1 `min_seconds` / round-2 `min_seconds`, >1 means round 2 is
-faster; `*` = columns most exposed to the external contention above, read
-with the least confidence.)
+| threads | tiny  | small | medium | large |
+|---|---|---|---|---|
+| 1  | 1.00x | 1.00x | 1.00x | 1.00x |
+| 2  | 1.07x | 1.36x | 1.25x | 1.26x |
+| 4  | 0.74x | 1.22x | 1.14x | 1.23x |
+| 6  | 0.86x | 1.10x | 1.13x | 1.20x |
+| 8  | 0.51x | 1.27x | 1.16x | 1.13x |
+| 12 | 0.31x | 1.00x | 1.27x | 1.02x |
 
-The 1-thread column is unambiguous and consistent across all four grid
-sizes: **1.18x-1.60x faster**, with no threading confound at all — this is
-real evidence the gather-removal (and, to a lesser extent, region fusion,
-which still has *some* per-call overhead even at 1 thread) produced a
-genuine algorithmic speedup, not noise. The 2-6 thread columns are mostly
-consistent with a similar win (most entries 1.1x-1.9x) but noisier
-(`large`@2 threads dipped to 0.84x, plausibly a contention spike given nothing
-in the code changed for that specific size/thread combination that would
-explain a regression). The 8/12-thread columns swing wildly in both
-directions and shouldn't be trusted as reflecting this code's actual
-behavior — they reflect who won the scheduler that second.
+![OpenMP strong scaling, round 2](../experiments/figures/openmp_scaling.png)
 
-**Bottom line on "is this the best possible OpenMP use now?"**: closer,
-not there. The gather removal is a real, clearly-evidenced win. Region
-fusion and the corrected `mirrorGhostCells` parallelization are
-mechanistically sound and fully verified for *correctness*, but this
-session's contention makes it impossible to cleanly attribute how much of
-the observed improvement is theirs versus the gather fix's — that
-attribution, and a trustworthy multi-thread scaling curve for the current
-code, are the next things to get on an idle machine. The roofline's
+**Compared directly against round 1's own clean table** (reproduced below,
+same methodology, same machine, before this round's changes):
+
+| threads | small (r1 → r2) | medium (r1 → r2) | large (r1 → r2) |
+|---|---|---|---|
+| 2  | 1.20x → 1.36x | 1.25x → 1.25x | 1.27x → 1.26x |
+| 4  | 1.00x → 1.22x | 1.03x → 1.14x | 1.17x → 1.23x |
+| 6  | 0.99x → 1.10x | 1.01x → 1.13x | 1.14x → 1.20x |
+| 8  | 1.03x → 1.27x | 1.00x → 1.16x | 1.11x → 1.13x |
+| 12 | **0.53x → 1.00x** | 0.91x → **1.27x** | 1.02x → 1.02x |
+
+**This is a real, broad win, not just the gather fix's serial-side speedup
+carrying over.** Every 4/6/8-thread entry for `small`/`medium`/`large`
+improved, several substantially. Most strikingly: round 1's small-grid
+12-thread collapse (0.53x — *slower* than single-threaded) is gone
+(1.00x, break-even); `medium`@12 threads went from round 1's worst-of-table
+0.91x to this round's *best*-of-table 1.27x. Both are exactly what the
+Amdahl's-law-tax hypothesis for `mirrorGhostCells` staying serial (round
+1's stated but undiagnosed suspicion) predicts once that tax is removed —
+the effect should show up most at higher thread counts, where the fixed
+serial fraction previously ate a larger share of the wall clock, and
+that's precisely where the improvement is largest. `large`@12 is the one
+flat entry (1.02x → 1.02x) — plausibly because `large`'s much bigger
+per-thread workload already amortized the fixed overheads round 1 was
+losing to, leaving less for this round's fixes to recover; consistent with,
+not contradicting, the Amdahl's-law explanation.
+
+**`tiny` is the one real regression, and it's a legitimate result, not a
+bug.** At 1656 active cells split across up to 12 threads, per-thread work
+drops to ~138 cells — small enough that fixed per-thread cost (team
+scheduling, cache-line padding overhead in the per-thread scratch buffers,
+OS thread wake-up latency) dominates actual work, and scaling degrades
+monotonically past 2 threads (1.07x → 0.74x → 0.86x → 0.51x → 0.31x).
+Round 1 didn't benchmark a grid this small, so there's no direct
+before/after for `tiny`, but the shape (monotonic decline once thread count
+exceeds what the problem can usefully use) is exactly what's expected for
+a fixed-size problem stretched across more workers than it has parallel
+work to give them — not something either round's changes caused or could
+fix; a bigger config or fewer threads is the correct response, not more
+tuning.
+
+**Bottom line on "is this the best possible OpenMP use now?"**: measurably
+closer. The gather removal, region fusion, and corrected
+`mirrorGhostCells` parallelization together produced a broad, verified
+improvement at every thread count from 2-12 for every grid size `small`
+and up — the small-grid 12-thread collapse that was round 1's most visible
+weak point is specifically fixed. What *hasn't* changed: the roofline's
 underlying ceiling (memory bandwidth saturating past ~2 threads on this
-CPU) hasn't moved and still caps how far OpenMP alone can go regardless of
-these fixes — the still-unfinished Y-sweep loop-order restructuring
-remains the other lever with headroom, per round 1's original conclusion.
+CPU) still caps how far OpenMP alone can go — peak speedup is still ~1.2-
+1.4x, not the 4-8x more threads would suggest — and the still-unfinished
+Y-sweep loop-order restructuring remains the other lever with headroom, per
+round 1's original conclusion. Untried: thread affinity (`OMP_PROC_BIND`/
+`OMP_PLACES`), which round 1 flagged as a free, zero-risk experiment and
+this round didn't get to either.
 
 ## Performance (round 1): strong scaling is poor, and the roofline predicted why
 

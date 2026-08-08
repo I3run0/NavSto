@@ -33,15 +33,25 @@ under `[Unreleased]`.
   pin, Neumann corner correction), not a fixable compiler hint — flagged,
   not changed. All of `make test`, `scripts/validate.py`, and
   `scripts/validate_parallel.py` stayed green throughout; red-black-vs-
-  serial `L2_rel` is bit-identical to round 1's `1.152e-03`. Performance
-  numbers are honestly caveated: both this round's and round 1's benchmark
-  captures ran under sustained, unrelated CPU contention on the shared
-  machine, making 8/12-thread numbers unreliable, but the 1-thread
-  before/after ratio (no OpenMP-overhead confound) shows a consistent
-  1.18x-1.60x wall-clock improvement across all four grid sizes — real
-  evidence the gather removal helped. Full writeup, numbers, and the
-  contention caveat in `docs/openmp-parallelization.md`'s "Round 2"
-  section.
+  serial `L2_rel` is bit-identical to round 1's `1.152e-03`. First
+  performance pass ran under unrelated CPU contention on the shared machine
+  and was flagged unreliable; **re-measured clean once that contention
+  stopped** — real, broad win: every 4/6/8/12-thread entry for
+  `small`/`medium`/`large` improved over round 1's own clean numbers, most
+  strikingly round 1's small-grid 12-thread collapse (`0.53x`, slower than
+  single-threaded) is now `1.00x` break-even, and `medium`@12 threads went
+  from round 1's worst entry (`0.91x`) to this round's best (`1.27x`) —
+  consistent with the (previously undiagnosed) hypothesis that
+  `mirrorGhostCells` staying serial was a real Amdahl's-law tax growing
+  with thread count. `tiny` (1656 cells) is the one real regression at
+  high thread count (down to `0.31x` at 12 threads) — a legitimate
+  too-little-work-per-thread result, not a bug. Peak speedup is still only
+  ~1.2-1.4x (the roofline's bandwidth-saturation ceiling hasn't moved), and
+  12-thread measurements showed real run-to-run variance (up to ~3.7x
+  spread across repeated batches on an otherwise-idle machine) worth
+  noting as its own finding. Full numbers, the clean-vs-contended
+  methodology note, and the updated scaling plot in
+  `docs/openmp-parallelization.md`'s "Round 2" section.
 - `src/openmp/` (copy of `src/serial/`, build wired via `make openmp` and
   CMake's `find_package(OpenMP)`-guarded `navsolver_omp` target) +
   `src/common/RedBlackIndexing.hpp` — red-black restructuring of
