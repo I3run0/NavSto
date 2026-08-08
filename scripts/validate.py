@@ -45,6 +45,7 @@ Usage:
 
 import argparse
 import csv
+import os
 import re
 import subprocess
 import sys
@@ -52,8 +53,20 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NAVSOLVER = REPO_ROOT / "navsolver"
-NAVSOLVER_OMP = REPO_ROOT / "navsolver_omp"
+
+# Where to look for the solver binaries. Defaults to the repo root (where
+# `make` drops them), overridable via NAVSOLVER_BIN_DIR so a CMake build
+# tree can be checked without copying binaries around -- that's how these
+# scripts are registered as ctest tests (see CMakeLists.txt).
+#
+# Deliberately an env var rather than a CLI flag: validate_parallel.py and
+# validate_cuda.py do `from validate import NAVSOLVER, ...`, which binds
+# their own module-level names at import time. A flag parsed in main()
+# could not rebind those; an env var read here, before those imports
+# resolve, propagates to every caller.
+BIN_DIR = Path(os.environ.get("NAVSOLVER_BIN_DIR", REPO_ROOT))
+NAVSOLVER = BIN_DIR / "navsolver"
+NAVSOLVER_OMP = BIN_DIR / "navsolver_omp"
 
 # Blow-up detector: intentionally generous, just needs to catch crashes/NaN/divergence.
 CONSERVATION_CEILING = 1e6

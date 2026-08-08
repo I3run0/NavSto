@@ -132,3 +132,68 @@ target_compile_definitions(navsolver_tests PRIVATE
 )
 
 add_test(NAME unit_tests COMMAND navsolver_tests)
+
+# ── Same test suite, linked against the OpenMP backend ───────────────────────
+# The suite only exercises initSimulation() and computeAccelerations(), which
+# are supposed to be numerically identical across backends (unlike
+# solvePressurePoisson, where OpenMP's red-black SOR is a deliberately
+# different algorithm -- see docs/openmp-parallelization.md, and
+# scripts/validate_parallel.py which covers that separately). So the golden
+# field applies unchanged here: it pins the OpenMP backend to the same
+# cell-by-cell accelerations as serial, which nothing in the C++ suite
+# checked before.
+if(OpenMP_CXX_FOUND)
+    add_executable(navsolver_tests_omp ${TEST_SRCS} ${OMPSRCDIR}/Physics.cpp)
+
+    target_include_directories(navsolver_tests_omp PRIVATE
+        ${INCDIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+
+    target_compile_options(navsolver_tests_omp PRIVATE
+        -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
+    )
+
+    target_compile_definitions(navsolver_tests_omp PRIVATE
+        NAVSOLVER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests"
+    )
+
+    target_link_libraries(navsolver_tests_omp PRIVATE OpenMP::OpenMP_CXX)
+
+    add_test(NAME unit_tests_omp COMMAND navsolver_tests_omp)
+endif()
+
+# ── Solver-level validation scripts ──────────────────────────────────────────
+# These were previously reachable only through the Makefile CI job. Registering
+# them here means the CMake job covers them too, and -- since they're the only
+# checks that exercise a whole built binary end-to-end (VTK field comparisons,
+# thread-count equivalence, GPU determinism) -- they're the real safety net for
+# the src/ restructuring. NAVSOLVER_BIN_DIR points them at this build tree
+# instead of the repo root; --skip-build stops them rebuilding what ctest
+# already built.
+find_package(Python3 COMPONENTS Interpreter)
+
+if(Python3_Interpreter_FOUND)
+    function(add_validation_test name script)
+        add_test(NAME ${name}
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/${script} --skip-build
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(${name} PROPERTIES
+            ENVIRONMENT "NAVSOLVER_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            TIMEOUT 900
+        )
+    endfunction()
+
+    add_validation_test(validate_physics  validate.py)
+
+    if(OpenMP_CXX_FOUND)
+        add_validation_test(validate_parallel validate_parallel.py)
+    endif()
+
+    if(CMAKE_CUDA_COMPILER)
+        add_validation_test(validate_cuda validate_cuda.py)
+    endif()
+else()
+    message(STATUS "Python3 interpreter not found — skipping validation-script tests")
+endif()

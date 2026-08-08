@@ -45,11 +45,11 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from validate import (REPO_ROOT, NAVSOLVER, parse_vtk_scalar,  # noqa: E402
+from validate import (REPO_ROOT, BIN_DIR, NAVSOLVER, parse_vtk_scalar,  # noqa: E402
                        REDBLACK_CFG_TEMPLATE, REDBLACK_TOL)
 from validate_parallel import compare_velocity_fields  # noqa: E402
 
-NAVSOLVER_CUDA = REPO_ROOT / "navsolver_cuda"
+NAVSOLVER_CUDA = BIN_DIR / "navsolver_cuda"
 
 DETERMINISM_TOL = 1e-12
 
@@ -84,14 +84,13 @@ def build():
     result = subprocess.run(["cmake", "--build", str(build_dir), "--target", "navsolver_cuda", "-j"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if result.returncode == 0:
-        built_bin = build_dir / "navsolver_cuda"
-        if built_bin.exists():
-            import shutil
-            shutil.copy(built_bin, NAVSOLVER_CUDA)
-        built_serial = build_dir / "navsolver"
-        if built_serial.exists():
-            import shutil
-            shutil.copy(built_serial, NAVSOLVER)
+        import shutil
+        # No-op when NAVSOLVER_BIN_DIR already points at build_dir (the
+        # ctest path) -- shutil.copy would raise SameFileError there.
+        for built, dest in ((build_dir / "navsolver_cuda", NAVSOLVER_CUDA),
+                            (build_dir / "navsolver", NAVSOLVER)):
+            if built.exists() and built.resolve() != dest.resolve():
+                shutil.copy(built, dest)
     return result.returncode == 0 and NAVSOLVER_CUDA.exists()
 
 
