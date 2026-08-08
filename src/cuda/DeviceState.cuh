@@ -32,11 +32,17 @@
         }                                                                       \
     } while (0)
 
-/// One (i,j,k) cell reference on the device — bit-identical layout to the
-/// host's CellIndex (SimState.hpp), duplicated here because CellIndex has
-/// no CUDA-visible definition requirement and we want this header
-/// self-contained for nvcc without pulling CUDA attributes onto the host
-/// struct used by OpenMP/serial code too.
+/// One (i,j,k) cell reference on the device. The host side no longer
+/// stores a per-cell red/black list (SimState.hpp's RedBlackIndexing.hpp
+/// v2 stores s.activeRows, one (i,j) ROW per active row, used for both
+/// colors via a strided k-loop — see that file's comment) since a
+/// gather-per-cell was found to be latency-bound on the CPU. CUDA still
+/// wants one thread per CELL, not per row (a GPU wants high thread counts
+/// to hide latency; collapsing to one thread per row like the CPU would
+/// cost ~numCellsZ/2x fewer threads, hurting occupancy) — so
+/// buildDeviceState() expands s.activeRows into per-cell red/black lists
+/// on the host before uploading, replicating the exact k-parity/stride
+/// formula src/openmp/Physics.cpp's updateColor() uses.
 struct DeviceCellIndex { int i, j, k; };
 
 // ---------------------------------------------------------------------------

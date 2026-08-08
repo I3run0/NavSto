@@ -62,13 +62,29 @@ int* uploadInts(const std::vector<int>& v) {
     return p;
 }
 
-DeviceCellIndex* uploadCells(const std::vector<CellIndex>& v) {
+DeviceCellIndex* uploadCells(const std::vector<DeviceCellIndex>& v) {
     if (v.empty()) return nullptr;
-    static_assert(sizeof(DeviceCellIndex) == sizeof(CellIndex), "layout mismatch");
     DeviceCellIndex* p;
     CUDA_CHECK(cudaMalloc(&p, v.size() * sizeof(DeviceCellIndex)));
     CUDA_CHECK(cudaMemcpy(p, v.data(), v.size() * sizeof(DeviceCellIndex), cudaMemcpyHostToDevice));
     return p;
+}
+
+// Expands s.activeRows (one (i,j) row, used for both colors — see
+// RedBlackIndexing.hpp) into a per-cell list for `wantParity`, replicating
+// src/openmp/Physics.cpp's updateColor() k-parity/stride formula exactly:
+// kStart is the smallest k in {1,2} with (i+j+k) parity == wantParity,
+// step 2 covers the rest of [1, numCellsZ].
+std::vector<DeviceCellIndex> expandRowsToCells(const SimState& s, int wantParity) {
+    std::vector<DeviceCellIndex> cells;
+    cells.reserve(s.activeRows.size() * (s.cfg.numCellsZ / 2 + 1));
+    for (const auto& row : s.activeRows) {
+        const int kStart = (((row.i + row.j) % 2) == wantParity) ? 2 : 1;
+        for (int k = kStart; k <= s.cfg.numCellsZ; k += 2) {
+            cells.push_back(DeviceCellIndex{row.i, row.j, k});
+        }
+    }
+    return cells;
 }
 
 // Exact active-cell count for computeMomentumResidual's RMS norm — counted
@@ -110,10 +126,12 @@ DeviceState buildDeviceState(SimState& s) {
     d.jHigh = uploadInts(s.jHigh);
 
     if (!s.redBlackBuilt) { buildRedBlackIndices(s); s.redBlackBuilt = true; }
-    d.redCells = uploadCells(s.redCells);
-    d.blackCells = uploadCells(s.blackCells);
-    d.nRed = (int)s.redCells.size();
-    d.nBlack = (int)s.blackCells.size();
+    const std::vector<DeviceCellIndex> redCells = expandRowsToCells(s, /*wantParity=*/0);
+    const std::vector<DeviceCellIndex> blackCells = expandRowsToCells(s, /*wantParity=*/1);
+    d.redCells = uploadCells(redCells);
+    d.blackCells = uploadCells(blackCells);
+    d.nRed = (int)redCells.size();
+    d.nBlack = (int)blackCells.size();
 
     d.numCellsX = cfg.numCellsX; d.numCellsY = cfg.numCellsY; d.numCellsZ = cfg.numCellsZ;
     d.numCellsXm1 = s.numCellsXm1; d.numCellsYm1 = s.numCellsYm1; d.numCellsZm1 = s.numCellsZm1;
@@ -472,37 +490,50 @@ void buildPressureSourceCuda(DeviceState& d, double timeStepSize) {
 // ═════════════════════════════════════════════════════════════════════════
 //  solvePressurePoisson — red-black SOR.
 //
-//  mirrorGhostCellsKernel is DELIBERATELY launched as a single GPU thread
-//  (<<<1,1>>>), not parallelized across i. docs/openmp-parallelization.md
-//  found a genuine data race parallelizing this exact function on the CPU
-//  (a cross-thread row collision between the im/ip "cross-row" writes and
-//  the j-boundary "same-row" writes) and left it serial there rather than
-//  ship an unverified fix with no ThreadSanitizer available. The same
-//  collision pattern applies here — worse, since a CUDA kernel launch has
-//  NO ordering guarantee among threads at all (OpenMP's schedule(static)
-//  at least gives contiguous, timing-correlated per-thread ranges), and
-//  cuda-memcheck's racecheck tool cannot be assumed available either. A
-//  single-thread kernel is slow but bit-for-bit equivalent to the proven-
-//  correct serial algorithm, keeps this GPU-resident (no D2H/H2D round
-//  trip per sweep), and avoids shipping an undiagnosed correctness bug.
-//  This is a real, expected performance bottleneck — see docs/cuda-port.md.
+//  mirrorGhostCells is split into two kernels, ported directly from the
+//  two-pass structure verified on the OpenMP path (src/openmp/Physics.cpp,
+//  docs/openmp-parallelization.md's "Round 2" section): kernelA does only
+//  the cross-row (im/ip) writes, one thread per row i; then, on kernel-
+//  launch-boundary ordering (this file uses no explicit CUDA streams, so
+//  the default stream serializes these two launches exactly like OpenMP's
+//  implicit barrier between its two `#pragma omp for` passes), kernelB
+//  does only the same-row (j/k-boundary) writes, one thread per row i.
+//  kernelB's writes are then provably confined to each thread's own row i
+//  since kernelA has fully completed (and its device-wide effects are
+//  visible — a completed kernel launch is a full device-wide memory fence,
+//  stronger than OpenMP's barrier needed here). This was previously a
+//  single <<<1,1>>>-launched serial kernel, kept that way because CUDA has
+//  no ordering guarantee AT ALL among threads within one launch (weaker
+//  than OpenMP's schedule(static)) and no race detector was available to
+//  verify a parallel version — see the verification section in
+//  docs/cuda-port.md for how this version was checked (determinism across
+//  repeated runs plus compute-sanitizer racecheck) before shipping.
 // ═════════════════════════════════════════════════════════════════════════
 
-__global__ void mirrorGhostCellsKernel(DeviceState d) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-    for (int i = 1; i <= d.numCellsX; ++i) {
-        const int im = i - 1, ip = i + 1;
-        int jLoopS, jLoopN; mirrorJRange(d, i, jLoopS, jLoopN);
-        for (int k = 1; k <= d.numCellsZ; ++k) {
-            for (int j = jLoopS; j <= jLoopN; ++j) {
-                if (i == 1 || i == d.iLow[j] + 1)            PRES(d, im, j, k) = PRES(d, i, j, k);
-                if (i == d.numCellsX || i == d.iHigh[j])     PRES(d, ip, j, k) = PRES(d, i, j, k);
-                if (j == jLoopS)                              PRES(d, i, j - 1, k) = PRES(d, i, j, k);
-                if (j == jLoopN)                              PRES(d, i, j + 1, k) = PRES(d, i, j, k);
-                if (d.solidWall) {
-                    if (k == 1)             PRES(d, i, j, k - 1) = PRES(d, i, j, k);
-                    if (k == d.numCellsZ)   PRES(d, i, j, k + 1) = PRES(d, i, j, k);
-                }
+__global__ void mirrorGhostCellsCrossRowKernel(DeviceState d) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
+    if (i > d.numCellsX) return;
+    const int im = i - 1, ip = i + 1;
+    int jLoopS, jLoopN; mirrorJRange(d, i, jLoopS, jLoopN);
+    for (int k = 1; k <= d.numCellsZ; ++k) {
+        for (int j = jLoopS; j <= jLoopN; ++j) {
+            if (i == 1 || i == d.iLow[j] + 1)            PRES(d, im, j, k) = PRES(d, i, j, k);
+            if (i == d.numCellsX || i == d.iHigh[j])     PRES(d, ip, j, k) = PRES(d, i, j, k);
+        }
+    }
+}
+
+__global__ void mirrorGhostCellsSameRowKernel(DeviceState d) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
+    if (i > d.numCellsX) return;
+    int jLoopS, jLoopN; mirrorJRange(d, i, jLoopS, jLoopN);
+    for (int k = 1; k <= d.numCellsZ; ++k) {
+        for (int j = jLoopS; j <= jLoopN; ++j) {
+            if (j == jLoopS)                              PRES(d, i, j - 1, k) = PRES(d, i, j, k);
+            if (j == jLoopN)                              PRES(d, i, j + 1, k) = PRES(d, i, j, k);
+            if (d.solidWall) {
+                if (k == 1)             PRES(d, i, j, k - 1) = PRES(d, i, j, k);
+                if (k == d.numCellsZ)   PRES(d, i, j, k + 1) = PRES(d, i, j, k);
             }
         }
     }
@@ -545,9 +576,11 @@ void solvePressurePoissonCuda(DeviceState& d) {
     CUDA_CHECK(cudaMemcpy(&pRef, d.press + d.idx(d.iRef, d.jRef, d.kRef), sizeof(double), cudaMemcpyDeviceToHost));
 
     for (int sweep = 0; sweep < d.numPressureIter; ++sweep) {
-        mirrorGhostCellsKernel<<<1, 1>>>(d);
+        mirrorGhostCellsCrossRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsSameRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
         updateColorKernel<<<gridFor(d.nRed), CUDA_BLOCK>>>(d, d.redCells, d.nRed, cX, cY, cZ, invDiag, pRef);
-        mirrorGhostCellsKernel<<<1, 1>>>(d);
+        mirrorGhostCellsCrossRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsSameRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
         updateColorKernel<<<gridFor(d.nBlack), CUDA_BLOCK>>>(d, d.blackCells, d.nBlack, cX, cY, cZ, invDiag, pRef);
     }
     CUDA_CHECK(cudaGetLastError());

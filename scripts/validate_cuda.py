@@ -16,14 +16,16 @@ differ about the CUDA port:
    at a large sweep count on a well-posed Straight-geometry config, not a
    raw pointwise comparison at production sweep counts.
 
-2. **Determinism**: navsolver_cuda run twice on the SAME config must match
-   near-bit-exactly. Every field write in every CUDA kernel here comes
-   from exactly one thread (see docs/cuda-port.md's per-kernel indexing
-   scheme) and mirrorGhostCells runs as a single-thread <<<1,1>>> kernel
-   specifically to avoid the cross-thread race documented in
-   docs/openmp-parallelization.md, so this should hold tightly -- this
-   check is what would catch it if some kernel's indexing turned out to
-   have an unintended overlapping write after all.
+2. **Determinism**: navsolver_cuda run multiple times on the SAME config
+   must match near-bit-exactly. mirrorGhostCells is now two kernels
+   (cross-row writes, then same-row writes, sequential launch order) --
+   see docs/cuda-port.md's "Follow-up" section for why that's still
+   race-free despite CUDA having no in-launch ordering guarantee. No
+   race detector (compute-sanitizer fails to launch in this environment)
+   was available to verify that claim directly, so this determinism check
+   -- run at both the default small config AND a multi-block stress config
+   -- is the actual verification evidence for that fix, not just a sanity
+   check.
 
 VRAM sizing note: the largest config below (48x24x12 = 13,824 cells, plus
 ghost padding) allocates roughly a few hundred field/scratch buffers on
@@ -139,17 +141,72 @@ def check_redblack_equivalence():
         return True
 
 
-def check_determinism():
-    print("\n== Determinism: navsolver_cuda vs itself, same config ==")
+def check_determinism(repeats=5):
+    # 5 repeats, not 2: matches the rigor of the OpenMP mirrorGhostCells
+    # verification (docs/openmp-parallelization.md's Round 2 -- "5
+    # repeated runs, byte-for-byte identical") now that the CUDA
+    # mirrorGhostCells kernel is also parallel (two-pass, one thread per
+    # row) instead of the original single-thread <<<1,1>>> launch. CUDA
+    # has weaker in-launch ordering guarantees than OpenMP's
+    # schedule(static), so more repeats buys more confidence per run.
+    print(f"\n== Determinism: navsolver_cuda vs itself, same config ({repeats} repeats) ==")
     with tempfile.TemporaryDirectory() as tmp:
         outs = []
-        for run_idx in range(2):
+        for run_idx in range(repeats):
             out_dir = Path(tmp) / f"det_{run_idx}"
             cfg_path = Path(tmp) / f"det_{run_idx}.cfg"
             cfg_path.write_text(DET_CFG_TEMPLATE.format(out=out_dir))
             run(NAVSOLVER_CUDA, cfg_path)
             outs.append(out_dir / "cuda_det_t000020.vtk")
-        return compare_velocity_fields(outs[0], outs[1], DETERMINISM_TOL, "run1 vs run2")
+        ok = True
+        for run_idx in range(1, repeats):
+            ok = compare_velocity_fields(outs[0], outs[run_idx], DETERMINISM_TOL,
+                                          f"run1 vs run{run_idx + 1}") and ok
+        return ok
+
+
+# gridFor(numCellsX) with CUDA_BLOCK=256 means DET_CFG_TEMPLATE's
+# numCellsX=24 keeps mirrorGhostCells's two kernels to a SINGLE block --
+# under-stresses any real cross-block race, since a single block's threads
+# have much more implicit lockstep/scheduling correlation than independent
+# blocks. This config forces numCellsX=320 > 256, i.e. >1 block, the
+# regime where a genuine ordering bug is most likely to surface.
+STRESS_CFG_TEMPLATE = """\
+numCellsX = 320
+numCellsY = 24
+numCellsZ = 12
+reynoldsNumber = 100.0
+hyperViscousStart = 0
+geometryShape = AbruptExpansion
+lateralBC = SolidWall
+outletBC = ZeroFirstDeriv
+initialProfile = InletProfile
+flowType = SteadyMarching
+maxTimeSteps = 5
+convergenceTol = 0
+numPressureIter = 5
+reportEveryN = 5
+outputDir = {out}
+runName = cuda_stress
+"""
+
+
+def check_determinism_multiblock(repeats=3):
+    print(f"\n== Determinism (multi-block stress, numCellsX=320): "
+          f"navsolver_cuda vs itself ({repeats} repeats) ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        outs = []
+        for run_idx in range(repeats):
+            out_dir = Path(tmp) / f"stress_{run_idx}"
+            cfg_path = Path(tmp) / f"stress_{run_idx}.cfg"
+            cfg_path.write_text(STRESS_CFG_TEMPLATE.format(out=out_dir))
+            run(NAVSOLVER_CUDA, cfg_path)
+            outs.append(out_dir / "cuda_stress_t000005.vtk")
+        ok = True
+        for run_idx in range(1, repeats):
+            ok = compare_velocity_fields(outs[0], outs[run_idx], DETERMINISM_TOL,
+                                          f"run1 vs run{run_idx + 1}") and ok
+        return ok
 
 
 def main():
@@ -171,6 +228,7 @@ def main():
 
     ok = check_redblack_equivalence()
     ok = check_determinism() and ok
+    ok = check_determinism_multiblock() and ok
 
     print()
     if ok:

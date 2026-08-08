@@ -10,6 +10,31 @@ under `[Unreleased]`.
 ## [Unreleased]
 
 ### Added
+- **CUDA `mirrorGhostCells` parallelized**: ported the OpenMP two-pass
+  cross-row/same-row split (`src/openmp/Physics.cpp`) to two CUDA kernels
+  (`mirrorGhostCellsCrossRowKernel`, `mirrorGhostCellsSameRowKernel`, one
+  thread per row `i` each, sequential launch on the default stream
+  providing the ordering), replacing the single `<<<1,1>>>` serial kernel
+  that was CUDA's dominant bottleneck. Along the way, fixed a pre-existing
+  build break where `src/cuda/Physics.cu` still referenced the
+  now-removed `SimState::redCells`/`blackCells` (`CellIndex` list) from
+  before the OpenMP round-2 gather removal — added
+  `expandRowsToCells()` to rebuild CUDA's needed per-cell red/black lists
+  from the new shared `s.activeRows`, since a GPU still wants one thread
+  per cell (unlike the CPU, which benefits from fewer/coarser threads).
+  `compute-sanitizer` (`racecheck`/`memcheck`) fails to launch in this
+  environment (`terminated before first instrumented API call`, tried
+  with `--target-processes all` and an explicit `--injection-path`) — the
+  same class of sandbox tooling gap already on record for `perf`/TSan.
+  Verified instead via extended determinism testing (5 repeats at the
+  existing config, plus a new `numCellsX=320` multi-block stress config to
+  exceed a single 256-thread block, 3 repeats), all bit-identical, plus
+  gauge-fixed red-black-vs-serial equivalence unchanged at `L2_rel=1.152e-03`.
+  **Real, substantial performance win**: 9.7×/5.9×/18.6× slower than
+  serial (previous measurement) improved to ~4.0×/~1.5×/~3.3× slower
+  (freshly re-measured same session) across the three previously-tested
+  configs — confirms `mirrorGhostCells` was in fact the dominant cost.
+  Full writeup in `docs/cuda-port.md`'s "Follow-up" section.
 - **OpenMP round-2 tuning**: replaced the red-black pressure solve's
   per-cell `CellIndex` index-list gather (`s.redCells`/`s.blackCells`) with
   a single `s.activeRows` row list (`RowIndex{i,j}`) plus a direct strided

@@ -180,12 +180,8 @@ against 4096 MiB available.
 
 ## Future work (not attempted this phase)
 
-- **Verify a parallel `mirrorGhostCells`.** The cross-row/same-row
-  two-pass split sketched above is a real, evaluable idea — it just needs
-  a race detector (`cuda-memcheck --tool racecheck` or equivalent) that
-  wasn't available in this pass to verify before shipping. Given the
-  measured cost above, this is very likely the single highest-value next
-  step for CUDA performance specifically.
+- ~~Verify a parallel `mirrorGhostCells`.~~ **Done — see "Follow-up:
+  `mirrorGhostCells` parallelized" below.**
 - **Shared memory for the sweep kernels.** Every sweep kernel currently
   reads/writes global memory for every access, including the per-thread
   scratch buffers — real global-memory-bound kernels, matching the
@@ -196,6 +192,95 @@ against 4096 MiB available.
   workstation or datacenter hardware — the *relative* mirrorGhostCells
   finding should generalize, but the absolute serial-vs-CUDA crossover
   point will not.
+
+## Follow-up: `mirrorGhostCells` parallelized
+
+**Builds on:** the "Two real findings" note above (the flagged
+`mirrorGhostCellsKernel` bottleneck) and, directly, the fix already proven
+on the CPU side — `src/openmp/Physics.cpp`'s two-pass `mirrorGhostCells`
+(see `docs/openmp-parallelization.md`'s "Round 2" section), which was
+merged into this branch first.
+
+**What changed.** The single `<<<1,1>>>` kernel is now two kernels, ported
+directly from the OpenMP two-pass structure: `mirrorGhostCellsCrossRowKernel`
+(cross-row `im`/`ip` writes only, one CUDA thread per row `i`) launched
+first, then `mirrorGhostCellsSameRowKernel` (same-row `j`/`k`-boundary
+writes only, one thread per row `i`) launched second. Both run on the
+default stream with no explicit `cudaStream_t` used anywhere in this file,
+so sequential launch order gives the same ordering guarantee OpenMP's
+implicit barrier gave — a completed kernel launch is a full device-wide
+memory fence, at least as strong as what the CPU version needed. `updateColorKernel`
+itself is unchanged.
+
+**A pre-existing, unrelated build break found and fixed along the way.**
+Before this fix could even build, `src/cuda/Physics.cu` failed to compile
+against the just-merged OpenMP branch: the OpenMP round-2 work (killing
+the red-black gather) renamed `SimState`'s per-cell `redCells`/`blackCells`
+(`CellIndex` list) to a single per-row `activeRows` (`RowIndex` list) with
+an implicit stride-2 `k` loop baked into `updateColor` — a change CUDA's
+`buildDeviceState` never saw. CUDA still wants one GPU thread per *cell*,
+not per row (a GPU wants high thread counts to hide latency; collapsing to
+one thread per row, like the CPU did, would cost ~`numCellsZ`/2× fewer
+threads and hurt occupancy for no reason a GPU cares about) — so
+`buildDeviceState` now has a small host-side `expandRowsToCells()` helper
+that expands `s.activeRows` back into per-cell `red`/`black` lists before
+upload, replicating `updateColor`'s exact k-parity/stride formula. This is
+orthogonal to the mirrorGhostCells work but was a hard blocker for testing
+it, so it's fixed here rather than left broken.
+
+**Verification.** `compute-sanitizer --tool racecheck` (and even plain
+`--tool memcheck`) fails to launch in this environment —
+`Error: Target application terminated before first instrumented API call`,
+tried both with and without `--target-processes all` and with an explicit
+`--injection-path` pointing at the actual installed
+`libsanitizer-collection.so` (the default search path is wrong for this
+apt-packaged nvidia-cuda-toolkit layout). This is the same class of
+sandbox tooling limitation already on record for this project (`perf`,
+ThreadSanitizer) — not a result, just an unavailable tool. Fell back to
+the project's established substitute for exactly this situation
+(determinism testing), extended beyond what `scripts/validate_cuda.py` had
+before:
+- 5 repeated runs (up from 2) of the existing 24×12×6 determinism config —
+  bit-identical (`L2_rel=0.000e+00`) all 4 comparisons.
+- A new stress config, `numCellsX=320` — large enough to force
+  `mirrorGhostCells`'s kernels past a single 256-thread block (the
+  original 24×12×6 config never exceeds one block, which under-stresses
+  any real cross-block ordering hazard since one block's threads have far
+  more implicit scheduling correlation than independent blocks do). 3
+  repeated runs, bit-identical.
+- Gauge-fixed red-black-vs-serial equivalence still passes at the same
+  `L2_rel=1.152e-03` as before this change — confirms the fix didn't shift
+  the converged solution.
+
+Standing caveat, honestly stated: determinism across repeated runs is
+strong evidence, not a proof — it's the same standard the OpenMP fix was
+held to before a hardware race detector was available there either, but a
+sanitizer that actually ran would still be stronger evidence than this if
+this environment's tooling gap is ever fixed.
+
+**Performance — a real, substantial improvement, honestly re-measured.**
+Same config shapes as the table above, same machine, freshly measured in
+one sitting so the ratios are directly comparable (the earlier table's
+absolute times were captured in a separate session under different machine
+load, so only ratios are compared here, not raw seconds):
+
+| Config | old ratio (single-thread mirror) | new ratio (two-pass mirror) |
+|---|---|---|
+| 48×24×12, `numPressureIter=5` | 9.7× slower | **~4.0× slower** |
+| 96×48×24, `numPressureIter=5` | 5.9× slower | **~1.5× slower** |
+| 48×24×12, `numPressureIter=50` | 18.6× slower | **~3.3× slower** |
+
+The 96×48×24 case in particular — the largest grid tested — is now only
+1.5× slower than serial, down from 5.9×, which is a real, usable result at
+that size on this entry-level GPU. All three cases improved substantially,
+confirming the original diagnosis: `mirrorGhostCells`'s single-thread
+kernel was in fact the dominant cost, not some other bottleneck.
+Kernel-launch overhead (now 4 mirror-kernel launches per sweep instead of
+2, since the single combined kernel became two smaller ones) is the likely
+reason this isn't closer to parity with serial — the *remaining* gap is
+plausibly launch-overhead-bound rather than mirror-work-bound, a
+reasonable next thing to check with a GPU-side profiler if one becomes
+available in this environment, but not verified here.
 
 ## Build
 
