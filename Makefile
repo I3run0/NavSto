@@ -44,12 +44,22 @@ OBJS := $(patsubst $(SRCDIR)/%.cpp, $(BUILDDIR)/%.o, $(SRCS))
 OMPSRCS := $(wildcard $(OMPSRCDIR)/*.cpp)
 OMPOBJS := $(patsubst $(OMPSRCDIR)/%.cpp, $(OMPBUILDDIR)/%.o, $(OMPSRCS))
 
+# Backend-independent sources (geometry + initial conditions — src/common/Setup.cpp).
+# Compiled once per build profile: the serial and OpenMP variants use different
+# flags (-fopenmp), so each gets its own object under its own build dir.
+COMMON_SRCS    := $(wildcard $(INCDIR)/*.cpp)
+COMMON_OBJS    := $(patsubst $(INCDIR)/%.cpp, $(BUILDDIR)/common_%.o, $(COMMON_SRCS))
+OMPCOMMON_OBJS := $(patsubst $(INCDIR)/%.cpp, $(OMPBUILDDIR)/common_%.o, $(COMMON_SRCS))
+
 TEST_SRCS := $(shell find $(TESTDIR) -name '*.cpp')
 TEST_OBJS := $(patsubst $(TESTDIR)/%.cpp, $(TESTBUILDDIR)/%.o, $(TEST_SRCS))
 
 # Tests link the solver's physics kernels directly (not main.cpp, which
 # has its own main()) so PhysicsTests.cpp can exercise them in isolation.
 TEST_PHYSICS_OBJ := $(TESTBUILDDIR)/serial_Physics.o
+
+# Setup.cpp (geometry/ICs) — the tests call initSimulation() directly.
+TEST_COMMON_OBJS := $(patsubst $(INCDIR)/%.cpp, $(TESTBUILDDIR)/common_%.o, $(COMMON_SRCS))
 
 # ── Build profiles ─────────────────────────────────────────────────────────────
 RELEASE_FLAGS  := -O3 -DNDEBUG -march=native -funroll-loops
@@ -81,11 +91,11 @@ profile:
 openmp: $(OMP_TARGET)
 
 # ── Link ───────────────────────────────────────────────────────────────────────
-$(TARGET): $(OBJS)
+$(TARGET): $(OBJS) $(COMMON_OBJS)
 	@echo "  LINK  $@"
 	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -o $@ $^
 
-$(OMP_TARGET): $(OMPOBJS)
+$(OMP_TARGET): $(OMPOBJS) $(OMPCOMMON_OBJS)
 	@echo "  LINK  $@"
 	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -o $@ $^
 
@@ -94,7 +104,15 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	@echo "  CXX   $<"
 	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -c $< -o $@
 
+$(BUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(BUILDDIR)
+	@echo "  CXX   $<"
+	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -c $< -o $@
+
 $(OMPBUILDDIR)/%.o: $(OMPSRCDIR)/%.cpp | $(OMPBUILDDIR)
+	@echo "  CXX   $<"
+	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -c $< -o $@
+
+$(OMPCOMMON_OBJS): $(OMPBUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(OMPBUILDDIR)
 	@echo "  CXX   $<"
 	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -c $< -o $@
 
@@ -127,7 +145,7 @@ validate:
 validate-parallel:
 	python3 scripts/validate_parallel.py
 
-$(TEST_TARGET): $(TEST_OBJS) $(TEST_PHYSICS_OBJ)
+$(TEST_TARGET): $(TEST_OBJS) $(TEST_PHYSICS_OBJ) $(TEST_COMMON_OBJS)
 	@echo "  LINK  $@"
 	$(CXX) $(CXXFLAGS) -O0 -g -o $@ $^
 
@@ -138,6 +156,10 @@ $(TESTBUILDDIR)/%.o: $(TESTDIR)/%.cpp | $(TESTBUILDDIR)
 	    -DNAVSOLVER_TEST_DATA_DIR=\"$(CURDIR)/$(TESTDIR)\" -c $< -o $@
 
 $(TEST_PHYSICS_OBJ): $(SRCDIR)/Physics.cpp | $(TESTBUILDDIR)
+	@echo "  CXX   $<"
+	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -c $< -o $@
+
+$(TEST_COMMON_OBJS): $(TESTBUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
 	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -c $< -o $@
 

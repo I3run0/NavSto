@@ -256,11 +256,14 @@ int main(int argc, char* argv[]) {
 
     DeviceState d{};
     try {
-        initSimulation(s);       // host-side geometry + IC setup (src/serial/Physics.cpp, reused as-is)
-        computeAccelerations(s); // host reference pass -- NOT used further; establishes s fully before upload.
-                                  // (Immediately recomputed on-device below so the GPU path never depends
-                                  // on this CPU result beyond providing consistent uploaded state.)
+        initSimulation(s);       // host-side geometry + IC setup (src/common/Setup.cpp, shared by all backends)
         d = buildDeviceState(s);
+        // The accel fields buildDeviceState() just uploaded are never read:
+        // computeAccelerationsCuda() opens with a full-array cudaMemset(0) on
+        // all three, exactly as the CPU kernels open with accelX.fill(0.0).
+        // A host computeAccelerations(s) pass used to run here to "establish s
+        // fully before upload"; it was pure dead work, and dropping it is what
+        // lets this target stop linking a CPU per-step kernel altogether.
         computeAccelerationsCuda(d);
     } catch (const std::exception& e) {
         LOG_ERROR("Initialisation failed: ", e.what());

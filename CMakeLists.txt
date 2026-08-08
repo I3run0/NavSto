@@ -9,7 +9,12 @@ set(INCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/common)
 
 file(GLOB SRCS "${SRCDIR}/*.cpp")
 
-add_executable(navsolver ${SRCS})
+# Backend-independent sources: geometry + initial conditions, run once before
+# time marching and identical for every backend (see src/common/Setup.cpp).
+# Every solver target and every test target links these.
+set(COMMON_SRCS ${INCDIR}/Setup.cpp)
+
+add_executable(navsolver ${SRCS} ${COMMON_SRCS})
 
 target_include_directories(navsolver PRIVATE ${INCDIR})
 
@@ -54,7 +59,7 @@ if(OpenMP_CXX_FOUND)
     set(OMPSRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/openmp)
     file(GLOB OMPSRCS "${OMPSRCDIR}/*.cpp")
 
-    add_executable(navsolver_omp ${OMPSRCS})
+    add_executable(navsolver_omp ${OMPSRCS} ${COMMON_SRCS})
 
     target_include_directories(navsolver_omp PRIVATE ${INCDIR})
 
@@ -82,13 +87,12 @@ if(CMAKE_CUDA_COMPILER)
     set(CUDASRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
     file(GLOB CUDASRCS "${CUDASRCDIR}/*.cu")
 
-    # Reuses src/serial/Physics.cpp AS-IS for initSimulation() (host-only
-    # geometry/IC setup, not a per-step hot path) and the other CPU
-    # implementations it defines under their original (non-Cuda-suffixed)
-    # names -- no symbol clash with Physics.cu's *Cuda-suffixed wrappers,
-    # and those CPU implementations simply go unused/unlinked-away rather
-    # than needing to be re-derived. See src/cuda/main.cu.
-    add_executable(navsolver_cuda ${CUDASRCS} ${SRCDIR}/Physics.cpp)
+    # Links the shared host-only setup (initSimulation) like every other
+    # target. It used to link src/serial/Physics.cpp instead -- purely to
+    # reach initSimulation() -- which also pulled in that file's CPU
+    # per-step kernels for the linker to strip. Setup.cpp carries the setup
+    # code and nothing else, so there is no longer anything to strip.
+    add_executable(navsolver_cuda ${CUDASRCS} ${COMMON_SRCS})
 
     target_include_directories(navsolver_cuda PRIVATE ${INCDIR} ${CUDASRCDIR})
 
@@ -116,7 +120,7 @@ enable_testing()
 
 file(GLOB_RECURSE TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 
-add_executable(navsolver_tests ${TEST_SRCS} ${SRCDIR}/Physics.cpp)
+add_executable(navsolver_tests ${TEST_SRCS} ${SRCDIR}/Physics.cpp ${COMMON_SRCS})
 
 target_include_directories(navsolver_tests PRIVATE
     ${INCDIR}
@@ -143,7 +147,7 @@ add_test(NAME unit_tests COMMAND navsolver_tests)
 # cell-by-cell accelerations as serial, which nothing in the C++ suite
 # checked before.
 if(OpenMP_CXX_FOUND)
-    add_executable(navsolver_tests_omp ${TEST_SRCS} ${OMPSRCDIR}/Physics.cpp)
+    add_executable(navsolver_tests_omp ${TEST_SRCS} ${OMPSRCDIR}/Physics.cpp ${COMMON_SRCS})
 
     target_include_directories(navsolver_tests_omp PRIVATE
         ${INCDIR}

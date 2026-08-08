@@ -193,7 +193,8 @@ Edit `config_re100_expansion.cfg`.  All keys and allowed values:
 ```
 NavSolver/
 ├── src/                        # C++ code only
-│   ├── common/                 # Physics kernels (ONCE), config, logging, VTK
+│   ├── common/                 # Shared by all backends: geometry + initial
+│   │                           # conditions (Setup.cpp), state, config, logging, VTK
 │   ├── serial/                 # Serial CPU: AoS layout, simple loops
 │   ├── openmp/                 # OpenMP: red-black pressure solve, per-thread scratch
 │   ├── cuda/                   # CUDA: one thread per plane/cell, red-black pressure solve

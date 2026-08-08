@@ -28,13 +28,17 @@ defeat that. Concretely, every function `src/serial/main.cpp`'s
 | `adaptTimeStep` | `adaptTimeStepCuda` (kernel + `thrust` reduction) |
 
 `initSimulation` (geometry + initial conditions) is **not** ported — it's a
-one-time, host-only setup cost, not a per-step hot path, so
-`src/cuda/main.cu` links `src/serial/Physics.cpp` directly and calls the
-existing host `initSimulation()` before uploading to the device. This is
-safe: `Physics.cu`'s device-launching wrappers use `*Cuda`-suffixed names,
-so there's no symbol clash with `Physics.cpp`'s CPU implementations of the
-same seven functions — they're simply compiled in and never called on the
-CUDA binary's path.
+one-time, host-only setup cost, not a per-step hot path, so `src/cuda/main.cu`
+calls the shared host `initSimulation()` before uploading to the device.
+
+That setup lives in `src/common/Setup.cpp`, linked by every backend. It used to
+live in `src/serial/Physics.cpp`, which this target linked in full purely to
+reach it — pulling in that file's CPU per-step kernels, which were compiled and
+then stripped, unused. `main.cu` also ran a host `computeAccelerations(s)` pass
+before uploading; that was dead work, since `computeAccelerationsCuda()` opens
+with a full-array `cudaMemset(0)` on all three accel fields and so never reads
+the uploaded values. Both are gone: the CUDA binary now links no CPU per-step
+kernel at all.
 
 Host round-trips are limited to exactly two things, both intentional and
 cheap: a full field download when a VTK snapshot is due (`reportEveryN`,
