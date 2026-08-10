@@ -33,6 +33,7 @@
 #include "Physics.hpp"
 #include "VtkExporter.hpp"
 #include "ConfigParser.hpp"
+#include "KernelTimers.hpp"
 #include "Logger.hpp"
 
 #include <iostream>
@@ -50,16 +51,16 @@ static void runSteady(SimState& s)
     s.useHalfStep = false;
 
     do {
-        adaptTimeStep(s);
+        NAVSOLVER_TIME(TimeStep, adaptTimeStep(s));
         ++s.timeStep;
         s.simulationTime += s.timeStepSize;
 
-        buildPressureSource(s);
-        solvePressurePoisson(s);
-        updateVelocities(s);
-        computeAccelerations(s);
-        computeMomentumResidual(s);
-        computeDivergence(s);
+        NAVSOLVER_TIME(PressSource, buildPressureSource(s));
+        NAVSOLVER_TIME(PressSolve, solvePressurePoisson(s));
+        NAVSOLVER_TIME(UpdateVel, updateVelocities(s));
+        NAVSOLVER_TIME(Accel, computeAccelerations(s));
+        NAVSOLVER_TIME(Residual, computeMomentumResidual(s));
+        NAVSOLVER_TIME(Divergence, computeDivergence(s));
 
         LOG_INFO("step=", std::setw(6), s.timeStep,
                  "  t=",  std::fixed, std::setprecision(5), s.simulationTime,
@@ -100,7 +101,7 @@ static void runRK4(SimState& s)
                     ? s.numCellsZm1 : s.cfg.numCellsZ;
 
     do {
-        adaptTimeStep(s);
+        NAVSOLVER_TIME(TimeStep, adaptTimeStep(s));
         ++s.timeStep;
         s.simulationTime += s.timeStepSize;
 
@@ -129,9 +130,9 @@ static void runRK4(SimState& s)
 
             s.useHalfStep = (stage <= 2);
 
-            buildPressureSource(s);
-            solvePressurePoisson(s);
-            updateVelocities(s);
+            NAVSOLVER_TIME(PressSource, buildPressureSource(s));
+            NAVSOLVER_TIME(PressSolve, solvePressurePoisson(s));
+            NAVSOLVER_TIME(UpdateVel, updateVelocities(s));
 
             // Accumulate weighted increment
             const double w = rkWeights[stage - 1];
@@ -143,7 +144,7 @@ static void runRK4(SimState& s)
                         Kw(i,j,k) += w * (s.velZ(i,j,k) - velZ0(i,j,k));
                     }
 
-            computeAccelerations(s);
+            NAVSOLVER_TIME(Accel, computeAccelerations(s));
         }
 
         // Final RK4 update: u_{n+1} = u_n + (K1+2K2+2K3+K4)/6
@@ -172,9 +173,9 @@ static void runRK4(SimState& s)
                     s.velZ(i,j,0) = s.velZ(i,j,s.cfg.numCellsZ);
                 }
 
-        computeAccelerations(s);
-        computeMomentumResidual(s);
-        computeDivergence(s);
+        NAVSOLVER_TIME(Accel, computeAccelerations(s));
+        NAVSOLVER_TIME(Residual, computeMomentumResidual(s));
+        NAVSOLVER_TIME(Divergence, computeDivergence(s));
 
         LOG_INFO("step=", std::setw(6), s.timeStep,
                  "  t=",  std::fixed, std::setprecision(5), s.simulationTime,
@@ -275,6 +276,20 @@ int main(int argc, char* argv[])
     LOG_INFO("  DilMax       : ", s.dilatationMax);
     LOG_INFO("  VTK files    → ", (s.cfg.outputDir / s.cfg.runName).string(), "_t*.vtk");
     LOG_INFO("  Convergence  → ", (s.cfg.outputDir / (s.cfg.runName + "_convergence.csv")).string());
+
+#if NAVSOLVER_PROFILE_ENABLED
+    // Profiling build only — see src/common/KernelTimers.hpp, in particular
+    // why total runtime here is NOT comparable to a normal build's.
+    {
+        const auto csv = s.cfg.outputDir / (s.cfg.runName + "_kernels.csv");
+        KernelProfile::instance().writeCsv(csv);
+
+        std::ostringstream table;
+        KernelProfile::instance().report(table);
+        LOG_INFO(table.str());
+        LOG_INFO("  Per-kernel   → ", csv.string());
+    }
+#endif
 
     return 0;
 }

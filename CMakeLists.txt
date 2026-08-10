@@ -15,6 +15,19 @@ file(GLOB SRCS "${SRCDIR}/*.cpp")
 #   DRIVER_SRC  entry point + time-marching loops — linked by the CPU solver
 #               binaries only. The test binaries bring their own main(), and
 #               the CUDA binary has its own driver (src/cuda/main.cu).
+# ── Per-kernel profiling (opt-in) ────────────────────────────────────────────
+# OFF by default and zero-cost when off: NAVSOLVER_TIME() expands to the bare
+# call. Deliberately not the default -- instrumentation that perturbed the
+# thing being measured would poison the numbers it exists to produce.
+#   cmake -S . -B build -DNAVSOLVER_PROFILE=ON
+option(NAVSOLVER_PROFILE "Attribute wall time to each per-step kernel" OFF)
+
+if(NAVSOLVER_PROFILE)
+    add_compile_definitions(NAVSOLVER_PROFILE)
+    message(STATUS "Per-kernel profiling ENABLED — total runtime is not "
+                   "comparable to a normal build (see src/common/KernelTimers.hpp)")
+endif()
+
 set(CORE_SRCS  ${INCDIR}/Setup.cpp)
 set(DRIVER_SRC ${INCDIR}/Driver.cpp)
 

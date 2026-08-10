@@ -12,6 +12,8 @@
 #    make bench       — Build + run the timing harness (scripts/benchmark.py)
 #    make validate    — Build + run physics correctness checks (scripts/validate.py)
 #    make profile     — Build with gprof instrumentation (-pg); see docs/
+#    make kprofile    — Build with per-kernel timing (which kernel got faster?)
+#    make kprofile-openmp — same, for the OpenMP variant
 #    make openmp      — Build the OpenMP variant (navsolver_omp); see docs/
 #    make validate-parallel — OpenMP thread-count equivalence + determinism checks
 #
@@ -75,13 +77,17 @@ SANITIZE_FLAGS := -O1 -g -fsanitize=address,undefined,leak \
 # -O2 (not -O3) to keep function boundaries visible in the call graph —
 # aggressive inlining at -O3 can hide where time is actually spent.
 PROFILE_FLAGS  := -O2 -g -DNDEBUG -pg
+# Per-kernel attribution (src/common/KernelTimers.hpp). Keeps -O3 -- unlike
+# PROFILE_FLAGS above, this measures whole kernels, not call graphs, so it
+# wants the same optimisation level as a production build.
+KPROFILE_FLAGS := -O3 -DNDEBUG -march=native -funroll-loops -DNAVSOLVER_PROFILE
 OMP_FLAGS      := -O3 -DNDEBUG -march=native -funroll-loops -fopenmp
 
 # Default: Release
 EXTRA_FLAGS ?= $(RELEASE_FLAGS)
 
 # ── Default target ─────────────────────────────────────────────────────────────
-.PHONY: all debug sanitize clean run check test bench validate profile openmp validate-parallel
+.PHONY: all debug sanitize clean run check test bench validate profile kprofile kprofile-openmp openmp validate-parallel
 
 all: $(TARGET)
 
@@ -93,6 +99,12 @@ sanitize:
 
 profile:
 	$(MAKE) EXTRA_FLAGS="$(PROFILE_FLAGS)" $(TARGET)
+
+kprofile:
+	$(MAKE) EXTRA_FLAGS="$(KPROFILE_FLAGS)" $(TARGET)
+
+kprofile-openmp:
+	$(MAKE) OMP_FLAGS="$(KPROFILE_FLAGS) -fopenmp" $(OMP_TARGET)
 
 openmp: $(OMP_TARGET)
 
