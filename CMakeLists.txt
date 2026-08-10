@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(NavSolver LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++20 for the FieldStorage concept (src/common/FieldStorage.hpp).
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/serial)
@@ -15,11 +16,8 @@ file(GLOB SRCS "${SRCDIR}/*.cpp")
 #   DRIVER_SRC  entry point + time-marching loops — linked by the CPU solver
 #               binaries only. The test binaries bring their own main(), and
 #               the CUDA binary has its own driver (src/cuda/main.cu).
-# ── Per-kernel profiling (opt-in) ────────────────────────────────────────────
-# OFF by default and zero-cost when off: NAVSOLVER_TIME() expands to the bare
-# call. Deliberately not the default -- instrumentation that perturbed the
-# thing being measured would poison the numbers it exists to produce.
-#   cmake -S . -B build -DNAVSOLVER_PROFILE=ON
+# Per-kernel profiling. Off by default and zero-cost when off; see
+# src/common/KernelTimers.hpp.
 option(NAVSOLVER_PROFILE "Attribute wall time to each per-step kernel" OFF)
 
 if(NAVSOLVER_PROFILE)
@@ -106,11 +104,7 @@ if(CMAKE_CUDA_COMPILER)
     set(CUDASRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
     file(GLOB CUDASRCS "${CUDASRCDIR}/*.cu")
 
-    # Links the shared host-only setup (initSimulation) like every other
-    # target. It used to link src/serial/Physics.cpp instead -- purely to
-    # reach initSimulation() -- which also pulled in that file's CPU
-    # per-step kernels for the linker to strip. Setup.cpp carries the setup
-    # code and nothing else, so there is no longer anything to strip.
+    # Own driver (main.cu), so no DRIVER_SRC.
     add_executable(navsolver_cuda ${CUDASRCS} ${CORE_SRCS})
 
     target_include_directories(navsolver_cuda PRIVATE ${INCDIR} ${CUDASRCDIR})
@@ -120,7 +114,7 @@ if(CMAKE_CUDA_COMPILER)
     # multi-arch build. See docs/cuda-port.md.
     set_target_properties(navsolver_cuda PROPERTIES
         CUDA_ARCHITECTURES 86
-        CUDA_STANDARD 17
+        CUDA_STANDARD 20
         CUDA_STANDARD_REQUIRED ON
     )
 

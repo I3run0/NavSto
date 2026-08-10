@@ -677,11 +677,8 @@ void solvePressurePoisson(SimState& s)
     const int kRef = (cfg.numCellsZ + 1) / 2;
     const double pRef = s.press(iRef, jRef, kRef);
 
-    // Built once and reused for the run — geometry is fixed after
-    // initSimulation(). The list, and this guard, live in THIS backend's
-    // Extras (src/openmp/BackendConfig.hpp); SimState used to carry both for
-    // every backend, with a separate `redBlackBuilt` bool that emptiness
-    // makes redundant.
+    // Built once — geometry is fixed after initSimulation(). Lives in this
+    // backend's Extras; emptiness replaces the old redBlackBuilt flag.
     if (s.ext.activeRows.empty())
         s.ext.activeRows = buildActiveRows(s);
 

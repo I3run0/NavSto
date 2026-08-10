@@ -1,28 +1,13 @@
 #pragma once
 // =============================================================================
-//  CudaKernelTimer.cuh — device-side half of the per-kernel profiling.
+//  CudaKernelTimer.cuh — GPU half of the per-kernel profiling.
 //
-//  Reports into the same KernelProfile registry as the CPU timer, so a GPU run
-//  and a CPU run produce the same table and the same <runName>_kernels.csv.
-//  Only the measurement differs, and it has to:
+//  Reports into the same KernelProfile as the CPU timer. Uses cudaEvents
+//  because launches are async: a host clock would time the launch, not the
+//  work. The stop-event sync that makes attribution possible also serializes
+//  work the GPU would overlap, so profiled totals are not comparable.
 //
-//  ── Why not steady_clock ───────────────────────────────────────────────────
-//  Kernel launches are asynchronous. Wrapping computeAccelerationsCuda() in a
-//  host wall-clock would time the LAUNCH -- a few microseconds of queueing --
-//  and attribute none of the actual GPU work. cudaEvent markers are recorded
-//  in-stream, so they bracket the work itself.
-//
-//  ── What this costs ────────────────────────────────────────────────────────
-//  cudaEventSynchronize() in the destructor. That is unavoidable for
-//  per-kernel attribution -- the elapsed time isn't readable until the stop
-//  event has actually happened -- but it drains the stream after every
-//  operator, serializing work the GPU would otherwise overlap across the step
-//  loop. So, as KernelTimers.hpp says: the SHARES are the deliverable, the
-//  TOTAL is not. Take end-to-end GPU timings from an uninstrumented build.
-//
-//  Events are created once per kernel slot and reused. Creating and destroying
-//  a pair per call would add microseconds to every measurement -- material
-//  against operators that run in single-digit milliseconds.
+//  Events are created once per kernel slot and reused.
 // =============================================================================
 
 #include "KernelTimers.hpp"

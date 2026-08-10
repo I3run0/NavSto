@@ -1,39 +1,23 @@
 #pragma once
 // =============================================================================
-//  BackendConfig.hpp (OpenMP) — this backend's tuning surface.
+//  BackendConfig.hpp (OpenMP) — this backend's storage and working memory.
 //
-//  See src/serial/BackendConfig.hpp for the mechanism. In short: SimState.hpp
-//  builds itself out of the two names below, and each solver target compiles
-//  with its own backend directory on the include path, so this is the file to
-//  edit when tuning THIS backend's memory -- no shared header changes, and no
-//  other backend affected.
-//
-//  What OpenMP needs beyond serial, and why it used to leak into SimState:
-//
-//    * one acceleration-scratch slice PER THREAD -- concurrent threads
-//      writing a shared buffer would race. The thread count is a property of
-//      this backend, so it is chosen here; the shared header used to
-//      #include <omp.h> behind an #ifdef and size every buffer by
-//      omp_get_max_threads() for all backends at once.
-//
-//    * the red-black active-row list its parallel pressure solve iterates.
-//      SimState carried that vector for every backend, and the serial solver
-//      left it empty for the whole of every run.
-//
-//  Field is still the stock GridField: nothing has yet needed a different
-//  layout here. When something does -- padding, an SoA split, NUMA-aware
-//  first touch -- this one line is where it changes, and serial and CUDA
-//  will not notice.
+//  See src/serial/BackendConfig.hpp for the mechanism. Extras carries what only
+//  this backend needs: one scratch slice per thread, and the red-black row list
+//  its parallel pressure solve iterates.
 // =============================================================================
 
 #include "AccelScratch.hpp"
+#include "FirstTouchField.hpp"
 #include "GridField.hpp"
 #include "RowIndex.hpp"
 
 #include <omp.h>
 #include <vector>
 
-/// Storage for every 3-D field in SimState.
+/// Storage for every 3-D field in SimState. FirstTouchField (this directory)
+/// is a contract-checked alternative, not selected: measured inside the
+/// run-to-run variance on this single-socket machine. Swapping is this line.
 using Field = GridField<>;
 
 /// Backend-private working memory, reachable as `s.ext`.

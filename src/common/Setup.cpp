@@ -1,17 +1,9 @@
 // =============================================================================
-//  Setup.cpp  —  Geometry construction and initial conditions.
+//  Setup.cpp — geometry construction and initial conditions.
 //
-//  Shared by every backend. Split out of src/serial/Physics.cpp, where it used
-//  to sit alongside the per-step kernels and was duplicated byte-for-byte into
-//  src/openmp/Physics.cpp -- while the CUDA target linked src/serial/Physics.cpp
-//  purely to reach initSimulation(), dragging in a whole set of unused CPU
-//  kernels for the linker to strip.
-//
-//  Nothing here is a per-step hot path: it runs once, before time marching, and
-//  is host-only even in the CUDA build (which uploads the result to the device
-//  afterwards -- see src/cuda/DeviceState.cuh). That is exactly why it is
-//  shared: it is setup the backends must agree on, not code under measurement.
-//  The per-step kernels -- the code being benchmarked -- stay per-backend.
+//  Shared by every backend, including CUDA (host-only, runs once before time
+//  marching). Setup the backends must agree on for their numbers to be
+//  comparable; the per-step kernels are what differ.
 // =============================================================================
 
 #include "Physics.hpp"

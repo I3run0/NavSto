@@ -1,16 +1,10 @@
 #pragma once
 // =============================================================================
-//  SimConfig.hpp  —  User-settable parameters, and the enums they use.
+//  SimConfig.hpp — user-settable parameters and their enums.
 //
-//  Split out of SimState.hpp so it can be included without pulling in the
-//  state itself. That matters because SimState is now assembled from a
-//  per-backend BackendConfig.hpp, whose pieces (AccelScratch, and whatever
-//  else a backend needs) are configured FROM this config -- including
-//  SimState there instead would be circular.
-//
-//  It is also the right seam on its own terms: this is the pure value type
-//  that must be identical across every backend for a benchmark comparison to
-//  mean anything. Nothing here depends on how any backend stores its data.
+//  Split from SimState so BackendConfig.hpp can configure itself from cfg
+//  without a circular include. Also the value type that must stay identical
+//  across backends for a comparison to mean anything.
 // =============================================================================
 
 #include <filesystem>

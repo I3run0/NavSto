@@ -1,34 +1,13 @@
 #pragma once
 // =============================================================================
-//  KernelTimers.hpp — per-kernel time attribution.
+//  KernelTimers.hpp — attributes wall time to each per-step operator.
 //
-//  Why this exists: before it, the only performance signal in the repo was
-//  scripts/benchmark.py timing the whole process. A 30% win inside
-//  solvePressurePoisson arrived diluted across the step loop, and a change
-//  that helped one kernel while hurting another was invisible. Tuning a
-//  backend means knowing WHICH kernel moved, so this attributes wall time to
-//  each of the seven per-step operators.
+//  Enabled by -DNAVSOLVER_PROFILE; otherwise NAVSOLVER_TIME(k, call) expands
+//  to the bare call and nothing here is instantiated.
 //
-//  ── Cost when disabled ─────────────────────────────────────────────────────
-//  Zero. Without -DNAVSOLVER_PROFILE, NAVSOLVER_TIME(k, call) expands to the
-//  bare call and nothing in this header is instantiated. That matters here
-//  more than usual: this is a benchmarking repo, and instrumentation that
-//  perturbed the thing being measured would poison the numbers it exists to
-//  produce. Default builds are byte-for-byte what they were.
-//
-//  ── What the profiling build DOES perturb ──────────────────────────────────
-//  Read this before comparing a profiled run against a normal one.
-//
-//    CPU   Two steady_clock reads per kernel call. Negligible against
-//          kernels that run for milliseconds, but not free.
-//
-//    CUDA  ScopedCudaKernelTimer (src/cuda) synchronizes on its stop event.
-//          Kernel launches are asynchronous, so wall-clock around a launch
-//          would otherwise measure launch overhead and nothing else -- but
-//          synchronizing per kernel serializes work the GPU would otherwise
-//          overlap. TOTAL runtime under -DNAVSOLVER_PROFILE is therefore NOT
-//          comparable to a normal run. The per-kernel SHARES are what this is
-//          for; take end-to-end timings from an uninstrumented build.
+//  Profiled TOTALS are not comparable to a normal build (the CUDA timer
+//  synchronizes per kernel — see CudaKernelTimer.cuh). The per-kernel SHARES
+//  are the point; take end-to-end timings from an uninstrumented build.
 // =============================================================================
 
 #include <cstddef>

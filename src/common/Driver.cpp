@@ -1,32 +1,16 @@
 // =============================================================================
-//  Driver.cpp  —  NavSolver entry point and time-marching loops.
+//  Driver.cpp — entry point and time-marching loops. Shared by CPU backends.
 //
-//  Shared by every CPU backend. Was two byte-identical 264-line copies at
-//  src/serial/main.cpp and src/openmp/main.cpp; compiled once per target now,
-//  so each still gets its own SimState and its own flags.
+//  Shared because it decides WHAT WORK GETS DONE — operator sequence, RK4
+//  weights, convergence test, diagnostic cadence. Backends disagreeing on any
+//  of that would stop their timings measuring the same computation. The kernels
+//  it dispatches to are what differ, selected at link time.
 //
-//  Sharing it is a benchmark-validity property, not a tidiness one: this file
-//  decides WHAT WORK GETS DONE -- the operator sequence, the RK4 stage
-//  weights, the convergence test, how often diagnostics and snapshots run. If
-//  two backends disagreed on any of that, their timings would not be
-//  measuring the same computation. The kernels those calls dispatch to are
-//  what differ, and they are selected at link time (see Physics.hpp).
+//  A backend whose loop genuinely differs opts out instead of branching here;
+//  src/cuda/main.cu does exactly that.
 //
-//  A backend whose loop genuinely differs opts out rather than branching here
-//  -- src/cuda/main.cu does exactly that, keeping fields device-resident for
-//  the whole per-step loop instead of round-tripping through the host.
-//
-//  Usage:
-//    ./navsolver [config.cfg]
-//
-//  If no config file is given, built-in defaults are used (Re=100, 48×24×24
-//  abrupt-expansion channel, RK4 transient).
-//
-//  Outputs:
-//    <outputDir>/<runName>_t<NNNNNN>.vtk    — ParaView-ready snapshots
-//    <outputDir>/<runName>_convergence.csv  — time-series diagnostics
-//    <outputDir>/<runName>.cfg              — snapshot of the config used
-//    navsolver.log                          — run log
+//  Usage: ./navsolver [config.cfg]   (defaults if omitted)
+//  Outputs: <outputDir>/<runName>_t*.vtk, _convergence.csv, .cfg; navsolver.log
 // =============================================================================
 
 #include "SimState.hpp"
@@ -91,9 +75,11 @@ static void runRK4(SimState& s)
     LOG_INFO("=== RK4 transient simulation ===");
     const GridSize& g = s.g;
 
-    // Allocate RK working storage
-    GridField<> velX0(g), velY0(g), velZ0(g);
-    GridField<> Ku(g),    Kv(g),    Kw(g);
+    // `Field`, not GridField<>: these are read and written in the same
+    // expressions as s.velX below, so a backend that re-lays-out its state
+    // fields would otherwise leave half the RK4 working set on the old layout.
+    Field velX0(g), velY0(g), velZ0(g);
+    Field Ku(g),    Kv(g),    Kw(g);
 
     constexpr double rkWeights[4] = {1.0, 2.0, 2.0, 1.0};
     const int NX = s.cfg.numCellsX;

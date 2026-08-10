@@ -1,24 +1,15 @@
 #pragma once
 // =============================================================================
-//  AccelScratch.hpp — computeAccelerations()'s coefficient working buffers.
+//  AccelScratch.hpp — computeAccelerations()'s coefficient buffers.
 //
-//  These used to live in SimState, which forced two backend-specific things
-//  into the shared state header: an `#ifdef _OPENMP` include of <omp.h>, and
-//  an allocateFields() that sized every buffer by omp_get_max_threads().
-//  Whether a backend wants per-thread slices, and how many, is a property of
-//  that backend -- not of the simulation -- so the thread count is now a
-//  parameter and each backend's Workspace passes its own (serial: 1).
+//  numThreads slices; each thread indexes its own via tid*scratchLenPerThread
+//  (a shared buffer would race). Slice lengths are padded to a cache line.
 //
-//  Reuse without re-zeroing is safe: the active index range each call touches
-//  is fixed by geometry (set once in initSimulation() and never changed), and
-//  every entry in that range is written before it is read within the same
-//  call. If that ever stops holding -- e.g. adaptive or moving geometry --
-//  these need re-zeroing per call.
+//  Reuse without re-zeroing is safe: the index range each call touches is
+//  fixed by geometry, and every entry in it is written before it is read.
 //
-//  This struct is a convenience, not a contract: a backend that wants a
-//  different layout (SoA splits, explicit alignment, NUMA-aware first touch)
-//  should stop using it and put its own buffers in its own Workspace. Nothing
-//  outside the backend's own kernels reads these.
+//  A backend wanting a different layout should put its own buffers in its
+//  Extras instead — nothing outside its kernels reads these.
 // =============================================================================
 
 #include "SimConfig.hpp"

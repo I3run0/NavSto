@@ -18,12 +18,13 @@
 #    make validate-parallel — OpenMP thread-count equivalence + determinism checks
 #
 #  Requirements:
-#    g++ >= 9  (or clang++ >= 10) with C++17 support
+#    g++ >= 10 (or clang++ >= 12) with C++20 support (concepts —
+#    see src/common/FieldStorage.hpp)
 # ==============================================================================
 
 # ── Toolchain ──────────────────────────────────────────────────────────────────
 CXX      := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -Wshadow \
+CXXFLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Wshadow \
             -Wno-unused-parameter
 
 # ── Directories ────────────────────────────────────────────────────────────────

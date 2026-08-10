@@ -1,35 +1,17 @@
 #pragma once
 // =============================================================================
-//  SimState.hpp  —  Complete simulation state (replaces scattered globals).
+//  SimState.hpp — full mutable state of a running simulation.
 //
-//  Every physical field, grid parameter, and I/O handle lives here so that:
-//    • functions declare their dependencies explicitly via (SimState&),
-//    • multiple independent simulations can coexist, and
-//    • the struct can be serialised / checkpointed later.
+//  `Field` (field storage) and `Extras` (backend-private working memory) come
+//  from the backend's own BackendConfig.hpp, resolved by include path — so
+//  SimState is deliberately a different type in each binary, and a backend can
+//  be retuned without touching a shared header.
 //
-//  ── Per-backend assembly ───────────────────────────────────────────────────
-//  Two of the pieces below are supplied by the backend being built, not fixed
-//  here: `Field` (the storage behind every 3-D field) and `Extras` (that
-//  backend's scratch and precomputed indices), both defined in its own
-//  BackendConfig.hpp. Each solver target compiles with its own backend
-//  directory on the include path, so this header resolves to a different --
-//  better-fitting -- SimState in each binary.
-//
-//  That is the same compile-time backend selection the repo already uses to
-//  decide which Physics.cpp defines the kernels, extended from the code to
-//  the data it works on. It exists so a backend can be tuned in isolation:
-//  changing how OpenMP stores its fields, or what scratch it keeps, is an
-//  edit to src/openmp/BackendConfig.hpp alone -- no shared header changes, no
-//  other backend affected, no `#ifdef` here. This header used to carry an
-//  `#ifdef _OPENMP` and size its buffers by omp_get_max_threads(), and to
-//  hold a red-black row list the serial solver left empty for every run.
-//
-//  Consequence to respect: SimState is deliberately a different type per
-//  binary. Never link objects built against two different backend configs
-//  into one executable.
+//  Never link objects built against two different backend configs.
 // =============================================================================
 
 #include "BackendConfig.hpp"
+#include "FieldStorage.hpp"
 #include "GridField.hpp"
 #include "SimConfig.hpp"
 
@@ -88,6 +70,10 @@ struct SimState {
     double uMaxAtInlet  = 0.0;
     double vMaxAtInlet  = 0.0;
     double hyperViscousDecay = 0.0;
+
+    static_assert(FieldStorage<Field>,
+                  "this backend's Field does not satisfy FieldStorage "
+                  "— see src/common/FieldStorage.hpp and your BackendConfig.hpp");
 
     // ── 3-D field arrays ───────────────────────────────────────────────────────
     Field velX;            ///< u — x-velocity

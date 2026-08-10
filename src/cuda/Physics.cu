@@ -41,7 +41,7 @@
 
 namespace {
 
-double* uploadField(const GridField<>& f) {
+double* uploadField(const Field& f) {
     const auto& data = f.data();
     double* devPtr;
     CUDA_CHECK(cudaMalloc(&devPtr, data.size() * sizeof(double)));
