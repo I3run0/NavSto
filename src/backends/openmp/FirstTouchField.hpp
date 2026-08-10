@@ -95,4 +95,4 @@ using FirstTouchField = FirstTouchFieldT<double>;
 // Compiled but not selected, so this is what stops it drifting out of contract.
 static_assert(FieldStorage<FirstTouchField>,
               "FirstTouchField no longer satisfies FieldStorage "
-              "— see src/common/FieldStorage.hpp");
+              "— see src/core/FieldStorage.hpp");

@@ -3,21 +3,21 @@
 **Builds on:** [`docs/roofline.md`](roofline.md) (memory-bound verdict for
 both hot kernels), [`docs/openmp-parallelization.md`](openmp-parallelization.md)
 (the red-black restructuring this port reuses via
-`src/common/RedBlackIndexing.hpp`, and — critically — the `mirrorGhostCells`
+`src/solver/Geometry.hpp`, and — critically — the `mirrorGhostCells`
 data race found there, which this port deliberately avoids re-introducing;
 see below).
 
 ## Scope
 
 Per the approved performance-study plan, this phase ports the *entire*
-per-step loop to CUDA (`src/cuda/`), not just the two hot kernels — the
+per-step loop to CUDA (`src/backends/cuda/`), not just the two hot kernels — the
 whole point of a GPU port is staying device-resident, and copying fields
 back to the host every step just to run one leftover CPU function would
-defeat that. Concretely, every function `src/serial/main.cpp`'s
+defeat that. Concretely, every function `src/solver/Driver.cpp`'s
 `runSteady`/`runRK4` call has a device-kernel-backed equivalent in
-`src/cuda/Physics.cu`:
+`src/backends/cuda/Physics.cu`:
 
-| CPU (`src/serial/Physics.cpp`) | CUDA (`src/cuda/Physics.cu`) |
+| CPU (`src/backends/serial/Physics.cpp`) | CUDA (`src/backends/cuda/Physics.cu`) |
 |---|---|
 | `computeAccelerations` | `computeAccelerationsCuda` (3 sweep kernels) |
 | `buildPressureSource` | `buildPressureSourceCuda` (2 boundary-zero kernels + 1 main kernel) |
@@ -28,11 +28,11 @@ defeat that. Concretely, every function `src/serial/main.cpp`'s
 | `adaptTimeStep` | `adaptTimeStepCuda` (kernel + `thrust` reduction) |
 
 `initSimulation` (geometry + initial conditions) is **not** ported — it's a
-one-time, host-only setup cost, not a per-step hot path, so `src/cuda/main.cu`
+one-time, host-only setup cost, not a per-step hot path, so `src/backends/cuda/Driver.cu`
 calls the shared host `initSimulation()` before uploading to the device.
 
-That setup lives in `src/common/Setup.cpp`, linked by every backend. It used to
-live in `src/serial/Physics.cpp`, which this target linked in full purely to
+That setup lives in `src/solver/Setup.cpp`, linked by every backend. It used to
+live in `src/backends/serial/Physics.cpp`, which this target linked in full purely to
 reach it — pulling in that file's CPU per-step kernels, which were compiled and
 then stripped, unused. `main.cu` also ran a host `computeAccelerations(s)` pass
 before uploading; that was dead work, since `computeAccelerationsCuda()` opens
@@ -134,8 +134,8 @@ mirroring `scripts/validate_parallel.py` — gates every result below:
    that could plausibly have raced.
 3. `make test` (15/15) and `python3 scripts/validate.py` (conservation,
    Poiseuille analytical check, OpenMP red-black tier) all still pass
-   unmodified — this phase only *added* `src/cuda/` and a CMake target,
-   touching nothing under `src/serial/`, `src/openmp/`, or `src/common/`
+   unmodified — this phase only *added* `src/backends/cuda/` and a CMake target,
+   touching nothing under `src/backends/serial/`, `src/backends/openmp/`, or `src/core/`
    except adding one `#include` of the already-shared
    `RedBlackIndexing.hpp` into the new `DeviceState.cuh`.
 
@@ -201,7 +201,7 @@ against 4096 MiB available.
 
 **Builds on:** the "Two real findings" note above (the flagged
 `mirrorGhostCellsKernel` bottleneck) and, directly, the fix already proven
-on the CPU side — `src/openmp/Physics.cpp`'s two-pass `mirrorGhostCells`
+on the CPU side — `src/backends/openmp/Physics.cpp`'s two-pass `mirrorGhostCells`
 (see `docs/openmp-parallelization.md`'s "Round 2" section), which was
 merged into this branch first.
 
@@ -217,7 +217,7 @@ memory fence, at least as strong as what the CPU version needed. `updateColorKer
 itself is unchanged.
 
 **A pre-existing, unrelated build break found and fixed along the way.**
-Before this fix could even build, `src/cuda/Physics.cu` failed to compile
+Before this fix could even build, `src/backends/cuda/Physics.cu` failed to compile
 against the just-merged OpenMP branch: the OpenMP round-2 work (killing
 the red-black gather) renamed `SimState`'s per-cell `redCells`/`blackCells`
 (`CellIndex` list) to a single per-row `activeRows` (`RowIndex` list) with

@@ -23,7 +23,7 @@ Two tiers:
    future work (see README).
 
 3. Red-black equivalence (only if navsolver_omp exists, built via
-   `make openmp`): src/openmp/Physics.cpp's solvePressurePoisson uses
+   `make openmp`): src/backends/openmp/Physics.cpp's solvePressurePoisson uses
    red-black SOR instead of the serial solver's sequential Gauss-Seidel/SOR
    (needed for OpenMP parallel-safety, see docs/openmp-parallelization.md).
    They converge to the SAME fixed point via a DIFFERENT iteration path,

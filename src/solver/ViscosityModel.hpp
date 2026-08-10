@@ -11,7 +11,7 @@
 //
 //  The CUDA backend deliberately does NOT use this: device code can't call a
 //  host function, and DeviceState is a different type from SimState, so
-//  src/cuda/Kernels.cuh carries a __device__ overload of the same formula.
+//  src/backends/cuda/DeviceMath.cuh carries a __device__ overload of the same formula.
 //  The two must stay in sync -- if you change the sponge profile here, change
 //  it there too.
 // =============================================================================

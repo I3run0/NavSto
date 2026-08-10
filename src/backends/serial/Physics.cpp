@@ -156,7 +156,7 @@ void computeAccelerations(SimState& s)
     // unit-stride loop (GridField stores k fastest-varying) instead of a
     // fixed outer index. Same math, same per-(i,k) result, only the order
     // work happens in relative to OTHER (i,k) pairs changes -- verified via
-    // tests/serial/GoldenFieldTest.cpp (captured from the pre-restructuring
+    // tests/backend/GoldenFieldTests.cpp (captured from the pre-restructuring
     // implementation).
     const double invDx2 = 1.0 / (cfg.cellSizeX * cfg.cellSizeX);
     for (int j = 1; j <= s.numCellsYm1; ++j) {

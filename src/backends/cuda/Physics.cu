@@ -1,5 +1,5 @@
 // =============================================================================
-//  Physics.cu  —  CUDA port of src/serial/Physics.cpp.
+//  Physics.cu  —  CUDA port of src/backends/serial/Physics.cpp.
 //
 //  Builds on: docs/roofline.md (memory-bound verdict), docs/openmp-
 //  parallelization.md (red-black restructuring + the mirrorGhostCells race
@@ -11,7 +11,7 @@
 //      stays a sequential per-thread loop — it's a genuine recurrence along
 //      that axis; the two perpendicular axes parallelize across threads).
 //    - solvePressurePoisson: one CUDA thread per active cell of one color
-//      (red or black), reusing src/common/Geometry.hpp's index
+//      (red or black), reusing src/solver/Geometry.hpp's index
 //      lists built once on the host and uploaded.
 //    - Everything else in the per-step loop (buildPressureSource,
 //      updateVelocities, computeMomentumResidual, computeDivergence,
@@ -23,7 +23,7 @@
 // =============================================================================
 
 #include "DeviceState.cuh"
-#include "Kernels.cuh"
+#include "DeviceMath.cuh"
 
 #include <thrust/device_ptr.h>
 #include <thrust/reduce.h>
@@ -72,7 +72,7 @@ DeviceCellIndex* uploadCells(const std::vector<DeviceCellIndex>& v) {
 
 // Expands an active-row list (one (i,j) row, used for both colors — see
 // Geometry.hpp) into a per-cell list for `wantParity`, replicating
-// src/openmp/Physics.cpp's updateColor() k-parity/stride formula exactly:
+// src/backends/openmp/Physics.cpp's updateColor() k-parity/stride formula exactly:
 // kStart is the smallest k in {1,2} with (i+j+k) parity == wantParity,
 // step 2 covers the rest of [1, numCellsZ].
 //
@@ -159,7 +159,7 @@ DeviceState buildDeviceState(SimState& s) {
     d.residCellCount = countResidCells(s);
 
     // Per-thread scratch for computeAccelerations' three sweeps — see
-    // Kernels.cuh / the sweep kernels below for the addressing scheme.
+    // DeviceMath.cuh / the sweep kernels below for the addressing scheme.
     const int maxDim = std::max({cfg.numCellsX, cfg.numCellsY, cfg.numCellsZ});
     d.scratchLen = maxDim + 3;
     d.numThreadsX = d.numCellsYm1 * d.numCellsZ;              // (j,k) pairs, upper bound
@@ -497,7 +497,7 @@ void buildPressureSourceCuda(DeviceState& d, double timeStepSize) {
 //  solvePressurePoisson — red-black SOR.
 //
 //  mirrorGhostCells is split into two kernels, ported directly from the
-//  two-pass structure verified on the OpenMP path (src/openmp/Physics.cpp,
+//  two-pass structure verified on the OpenMP path (src/backends/openmp/Physics.cpp,
 //  docs/openmp-parallelization.md's "Round 2" section): kernelA does only
 //  the cross-row (im/ip) writes, one thread per row i; then, on kernel-
 //  launch-boundary ordering (this file uses no explicit CUDA streams, so

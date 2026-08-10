@@ -7,8 +7,8 @@ differ about the CUDA port:
 
 1. **Red-black equivalence, gauge-fixed** (navsolver_cuda vs navsolver):
    solvePressurePoisson on the CUDA path uses the SAME red-black SOR
-   restructuring as navsolver_omp (see src/common/RedBlackIndexing.hpp,
-   src/cuda/Physics.cu's solvePressurePoissonCuda) -- a different iterative
+   restructuring as navsolver_omp (see src/solver/Geometry.hpp,
+   src/backends/cuda/Physics.cu's solvePressurePoissonCuda) -- a different iterative
    algorithm from the serial solver's sequential Gauss-Seidel/SOR, needed
    for GPU parallel-safety. It converges to the SAME fixed point via a
    DIFFERENT path, so -- exactly like scripts/validate.py's tier 3 -- this

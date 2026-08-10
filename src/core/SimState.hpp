@@ -73,7 +73,7 @@ struct SimState {
 
     static_assert(FieldStorage<Field>,
                   "this backend's Field does not satisfy FieldStorage "
-                  "— see src/common/FieldStorage.hpp and your BackendConfig.hpp");
+                  "— see src/core/FieldStorage.hpp and your BackendConfig.hpp");
 
     // ── 3-D field arrays ───────────────────────────────────────────────────────
     Field velX;            ///< u — x-velocity

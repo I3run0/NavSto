@@ -5,8 +5,15 @@ project(NavSolver LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(SRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/serial)
-set(INCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/common)
+# Shared layers, by role. Every target gets all three on its include path;
+# the backend directory added per-target is what makes SimState resolve
+# differently in each binary (see src/core/SimState.hpp).
+set(COREDIR   ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+set(SOLVERDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/solver)
+set(IODIR     ${CMAKE_CURRENT_SOURCE_DIR}/src/io)
+set(SHARED_INC ${COREDIR} ${SOLVERDIR} ${IODIR})
+
+set(SRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/serial)
 
 file(GLOB SRCS "${SRCDIR}/*.cpp")
 
@@ -26,14 +33,14 @@ if(NAVSOLVER_PROFILE)
                    "comparable to a normal build (see src/common/KernelTimers.hpp)")
 endif()
 
-set(CORE_SRCS  ${INCDIR}/Setup.cpp)
-set(DRIVER_SRC ${INCDIR}/Driver.cpp)
+set(CORE_SRCS  ${SOLVERDIR}/Setup.cpp)
+set(DRIVER_SRC ${SOLVERDIR}/Driver.cpp)
 
 add_executable(navsolver ${SRCS} ${CORE_SRCS} ${DRIVER_SRC})
 
 # ${SRCDIR} first-class on the include path: SimState.hpp includes
 # "BackendConfig.hpp", which must resolve to THIS backend's copy.
-target_include_directories(navsolver PRIVATE ${INCDIR} ${SRCDIR})
+target_include_directories(navsolver PRIVATE ${SHARED_INC} ${SRCDIR})
 
 target_compile_options(navsolver PRIVATE
     -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
@@ -73,12 +80,12 @@ add_custom_target(check
 find_package(OpenMP)
 
 if(OpenMP_CXX_FOUND)
-    set(OMPSRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/openmp)
+    set(OMPSRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/openmp)
     file(GLOB OMPSRCS "${OMPSRCDIR}/*.cpp")
 
     add_executable(navsolver_omp ${OMPSRCS} ${CORE_SRCS} ${DRIVER_SRC})
 
-    target_include_directories(navsolver_omp PRIVATE ${INCDIR} ${OMPSRCDIR})
+    target_include_directories(navsolver_omp PRIVATE ${SHARED_INC} ${OMPSRCDIR})
 
     target_compile_options(navsolver_omp PRIVATE
         -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
@@ -101,13 +108,13 @@ check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
 
-    set(CUDASRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+    set(CUDASRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cuda)
     file(GLOB CUDASRCS "${CUDASRCDIR}/*.cu")
 
     # Own driver (main.cu), so no DRIVER_SRC.
     add_executable(navsolver_cuda ${CUDASRCS} ${CORE_SRCS})
 
-    target_include_directories(navsolver_cuda PRIVATE ${INCDIR} ${CUDASRCDIR})
+    target_include_directories(navsolver_cuda PRIVATE ${SHARED_INC} ${CUDASRCDIR})
 
     # sm_86: this machine's GPU specifically (NVIDIA GeForce MX570 A,
     # Compute Capability 8.6) -- deliberately narrow, not a generic
@@ -136,7 +143,7 @@ file(GLOB_RECURSE TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 add_executable(navsolver_tests ${TEST_SRCS} ${SRCDIR}/Physics.cpp ${CORE_SRCS})
 
 target_include_directories(navsolver_tests PRIVATE
-    ${INCDIR}
+    ${SHARED_INC}
     ${SRCDIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
 )
@@ -164,7 +171,7 @@ if(OpenMP_CXX_FOUND)
     add_executable(navsolver_tests_omp ${TEST_SRCS} ${OMPSRCDIR}/Physics.cpp ${CORE_SRCS})
 
     target_include_directories(navsolver_tests_omp PRIVATE
-        ${INCDIR}
+        ${SHARED_INC}
         ${OMPSRCDIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests
     )

@@ -13,7 +13,7 @@ Combines three things, each measured/derived separately and documented:
 
 2. Analytical FLOP/byte/exp-call counts per interior cell for
    computeAccelerations and solvePressurePoisson, derived by hand from
-   src/serial/Physics.cpp (see docs/roofline.md for the full derivation —
+   src/backends/serial/Physics.cpp (see docs/roofline.md for the full derivation —
    these constants are NOT re-derived automatically, they're transcribed
    from that manual count, so they must be updated by hand if the kernels
    change).

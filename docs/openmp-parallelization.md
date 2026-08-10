@@ -21,14 +21,14 @@ algorithm" with "did I introduce a race" would make both nearly
 undebuggable together, and this is a genuine algorithm change (same fixed
 point, different iteration path), not just an engineering refactor.
 
-Also built as shared infrastructure (`src/common/RedBlackIndexing.hpp`),
+Also built as shared infrastructure (`src/solver/Geometry.hpp`),
 not OpenMP-specific — the same red/black index lists are the planned
 foundation for the CUDA pressure-solve kernels too, so this is built once
 rather than re-derived per backend.
 
 ## What changed
 
-- `src/common/RedBlackIndexing.hpp` — `buildRedBlackIndices(SimState&)`
+- `src/solver/Geometry.hpp` — `buildRedBlackIndices(SimState&)`
   fills `s.redCells`/`s.blackCells` (flat `CellIndex{i,j,k}` lists) for the
   active interior domain, using the identical bounds logic
   `solvePressurePoisson` already used for its `jLoopS`/`jLoopN`
@@ -37,13 +37,13 @@ rather than re-derived per backend.
   fixed after `initSimulation()`. **Superseded by the row-list/strided
   scheme in "Round 2" below** — kept here as the accurate historical
   record of what was first built and verified.
-- `src/openmp/` created as a full copy of `src/serial/` (deliberately
+- `src/backends/openmp/` created as a full copy of `src/backends/serial/` (deliberately
   duplicative, not `#ifdef`-branched into the serial file — lower risk,
   doesn't destabilize the already-verified serial path while editing for
   parallelism; the tradeoff is ~900 duplicated lines, with a noted future
   cleanup once both paths stabilize: extract the unchanged, non-hot
-  functions into `src/common/`).
-- `solvePressurePoisson` in `src/openmp/Physics.cpp` restructured: the
+  functions into `src/core/`).
+- `solvePressurePoisson` in `src/backends/openmp/Physics.cpp` restructured: the
   serial version's *inline* Neumann ghost-cell mirroring (interleaved
   mid-sweep, using whatever `press(i,j,k)` holds at that point in a single
   continuous traversal) can't survive reordering into red-black — colors

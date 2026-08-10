@@ -46,12 +46,12 @@ change — the Poiseuille check seeds the *exact* solution as initial
 condition, so residuals are already ~0 there regardless of whether this
 restructuring introduced a subtle bug away from equilibrium.
 
-Added `tests/serial/GoldenFieldTest.cpp`: captures `accelX`/`accelY`/`accelZ`
+Added `tests/backend/GoldenFieldTests.cpp`: captures `accelX`/`accelY`/`accelZ`
 field-by-field (not just scalar residuals, which can hide a compensating
 error) from the pre-restructuring implementation on a deliberately
 **non-equilibrium** config (`AbruptExpansion` + `InletProfile` init, 24×12×6
 — chosen over `PotentialFlow` init for denser non-zero coverage, ~10% of
-cells vs. ~1%), stored as `tests/serial/golden/accel_abrupt_expansion_24x12x6.txt`.
+cells vs. ~1%), stored as `tests/backend/golden/accel_abrupt_expansion_24x12x6.txt`.
 Compares every cell within `1e-12` relative tolerance (`1e-14` absolute
 floor for near-zero values). **Passes** against the restructured
 implementation — bit-for-bit equivalent within floating-point noise.

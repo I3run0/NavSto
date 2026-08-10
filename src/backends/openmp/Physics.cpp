@@ -11,14 +11,14 @@
 //  Pressure: red-black SOR solution of ∇²p = S (not plain Gauss-Seidel —
 //            see docs/openmp-parallelization.md for why).
 //
-//  Started as a full copy of src/serial/Physics.cpp (deliberately, not
+//  Started as a full copy of src/backends/serial/Physics.cpp (deliberately, not
 //  #ifdef-branched into the serial file — see docs/openmp-parallelization.md
 //  for that tradeoff) with computeAccelerations() and solvePressurePoisson()
 //  modified for parallelism; the remaining per-step kernels are unchanged
 //  from serial.
 //
 //  Geometry and initial conditions are NOT duplicated here: they moved to
-//  src/common/Setup.cpp, shared by every backend. This file holds only
+//  src/solver/Setup.cpp, shared by every backend. This file holds only
 //  per-step kernels — the code actually under measurement.
 // =============================================================================
 
@@ -106,7 +106,7 @@ void applyVelocityBCs(SimState& s)
 // ---------------------------------------------------------------------------
 //  Red-black solvePressurePoisson helpers.
 //
-//  The serial solver (src/serial/Physics.cpp) interleaves Neumann
+//  The serial solver (src/backends/serial/Physics.cpp) interleaves Neumann
 //  ghost-cell mirroring *inline*, mid-sweep, using whatever press(i,j,k)
 //  holds at that point in the single i/k/j traversal. Red-black updates
 //  cells out of that traversal order (all RED, then all BLACK), so the
@@ -350,7 +350,7 @@ void computeAccelerations(SimState& s)
     // unit-stride loop (GridField stores k fastest-varying) instead of a
     // fixed outer index. Same math, same per-(i,k) result, only the order
     // work happens in relative to OTHER (i,k) pairs changes -- verified via
-    // tests/serial/GoldenFieldTest.cpp (captured from the pre-restructuring
+    // tests/backend/GoldenFieldTests.cpp (captured from the pre-restructuring
     // implementation).
     const double invDx2 = 1.0 / (cfg.cellSizeX * cfg.cellSizeX);
     // Parallel over j: each j-plane's 5-pass computation is self-contained

@@ -1,7 +1,7 @@
 // =============================================================================
-//  main.cu  —  NavSolver CUDA entry point.
+//  Driver.cu  —  NavSolver CUDA entry point and time-marching loops.
 //
-//  Mirrors src/serial/main.cpp's driver structure (same two flow types,
+//  Mirrors src/solver/Driver.cpp's driver structure (same two flow types,
 //  same logging/CSV/VTK cadence) but every per-step physics call runs on
 //  the GPU via the *Cuda wrappers in Physics.cu. Field data stays device-
 //  resident for the WHOLE per-step loop; the only host round-trips are (a)
@@ -52,7 +52,7 @@ __global__ void rk4RestoreKernel(DeviceState d, const double* velX0, const doubl
 
 // Accumulates over the SAME active domain as updateVelocitiesKernel
 // (i:1..numCellsXm1, j:jLow[i]+1..jHigh[i]-1, k:1..KKfim) — see
-// src/serial/main.cpp's runRK4 for the reference loop this mirrors.
+// src/solver/Driver.cpp's runRK4 for the reference loop this mirrors.
 __global__ void rk4AccumulateKernel(DeviceState d, const double* velX0, const double* velY0, const double* velZ0,
                                      double* Ku, double* Kv, double* Kw, double w) {
     const long long total = (long long)d.numCellsXm1 * (d.numCellsY + 1) * d.numCellsZ;
@@ -135,7 +135,7 @@ static void runSteady(SimState& s, DeviceState& d) {
 
 // ---------------------------------------------------------------------------
 //  RK4 transient simulation — same four-stage structure as
-//  src/serial/main.cpp's runRK4, with the save/restore/accumulate/combine
+//  src/solver/Driver.cpp's runRK4, with the save/restore/accumulate/combine
 //  bookkeeping done as device kernels so the loop stays GPU-resident.
 // ---------------------------------------------------------------------------
 static void runRK4(SimState& s, DeviceState& d) {
@@ -178,7 +178,7 @@ static void runRK4(SimState& s, DeviceState& d) {
         // Final BCs (outlet + periodic) — reuse the same post-updateVelocities
         // BC kernels via a zero-effect updateVelocitiesCuda-style call would
         // recompute velocities; instead call the BC kernels directly through
-        // a dedicated pass identical to src/serial/main.cpp's runRK4 tail.
+        // a dedicated pass identical to src/solver/Driver.cpp's runRK4 tail.
         NAVSOLVER_TIME_CUDA(Accel, computeAccelerationsCuda(d));  // also applies periodic accel copy internally (zSweepKernel)
         NAVSOLVER_TIME_CUDA(Residual, computeMomentumResidualCuda(d, s.momentumResidMax, s.momentumResidRMS));
         NAVSOLVER_TIME_CUDA(Divergence, computeDivergenceCuda(d, s.dilatationMax, s.intDivergence, s.intAbsDivergence));
@@ -257,7 +257,7 @@ int main(int argc, char* argv[]) {
 
     DeviceState d{};
     try {
-        initSimulation(s);       // host-side geometry + IC setup (src/common/Setup.cpp, shared by all backends)
+        initSimulation(s);       // host-side geometry + IC setup (src/solver/Setup.cpp, shared by all backends)
         d = buildDeviceState(s);
         // The accel fields buildDeviceState() just uploaded are never read:
         // computeAccelerationsCuda() opens with a full-array cudaMemset(0) on

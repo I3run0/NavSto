@@ -17,7 +17,7 @@
 // errors away from equilibrium that the analytical check can't see.
 //
 // Golden data was captured from the pre-restructuring implementation (see
-// tests/serial/golden/accel_abrupt_expansion_24x12x6.txt) and must match
+// tests/backend/golden/accel_abrupt_expansion_24x12x6.txt) and must match
 // every subsequent implementation to a tight relative tolerance -- the
 // restructuring is supposed to be numerically a no-op (same math, only
 // which loop is innermost changes), so any real difference beyond floating-
@@ -28,9 +28,9 @@ namespace {
 
 std::string goldenPath(const std::string& name) {
 #ifdef NAVSOLVER_TEST_DATA_DIR
-    return std::string(NAVSOLVER_TEST_DATA_DIR) + "/serial/golden/" + name;
+    return std::string(NAVSOLVER_TEST_DATA_DIR) + "/backend/golden/" + name;
 #else
-    return "tests/serial/golden/" + name;  // fallback: assumes CWD == repo root
+    return "tests/backend/golden/" + name;  // fallback: assumes CWD == repo root
 #endif
 }
 

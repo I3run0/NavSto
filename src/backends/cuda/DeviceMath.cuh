@@ -1,8 +1,8 @@
 #pragma once
 // =============================================================================
-//  Kernels.cuh  —  Device-side field accessors and UNIFAES math helpers
+//  DeviceMath.cuh  —  Device-side field accessors and UNIFAES math helpers
 //  shared by every kernel in Physics.cu. Mirrors the anonymous-namespace
-//  helpers in src/serial/Physics.cpp exactly (same formulas, same variable
+//  helpers in src/backends/serial/Physics.cpp exactly (same formulas, same variable
 //  names where practical) so the two can be diffed side-by-side.
 // =============================================================================
 
@@ -61,7 +61,7 @@ __device__ __forceinline__ double effectiveInvRe(const DeviceState& d, int i) {
 }
 
 // ── Active-domain bound helpers — kept in sync BY HAND with
-//    src/serial/Physics.cpp's buildPressureSource/computeDivergence (jS/jN)
+//    src/backends/serial/Physics.cpp's buildPressureSource/computeDivergence (jS/jN)
 //    and solvePressurePoisson/Geometry.hpp's ghost-mirror bounds
 //    (jLoopS/jLoopN), exactly like Geometry.hpp already documents
 //    doing for the CPU paths. ──────────────────────────────────────────────

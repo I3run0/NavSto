@@ -28,12 +28,16 @@ CXXFLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Wshadow \
             -Wno-unused-parameter
 
 # ── Directories ────────────────────────────────────────────────────────────────
-SRCDIR   := src/serial
-INCDIR   := src/common
+SRCDIR   := src/backends/serial
+COREDIR  := src/core
+SOLVERDIR:= src/solver
+IODIR    := src/io
+# Shared layers, by role; the backend dir is added per-target below.
+SHARED_INC := -I$(COREDIR) -I$(SOLVERDIR) -I$(IODIR)
 BUILDDIR := build
 TARGET   := navsolver
 
-OMPSRCDIR   := src/openmp
+OMPSRCDIR   := src/backends/openmp
 OMPBUILDDIR := build/openmp
 OMP_TARGET  := navsolver_omp
 
@@ -52,12 +56,12 @@ OMPOBJS := $(patsubst $(OMPSRCDIR)/%.cpp, $(OMPBUILDDIR)/%.o, $(OMPSRCS))
 # flags (-fopenmp), so each gets its own object under its own build dir.
 # Listed explicitly, not globbed: Driver.cpp defines main(), so the test
 # binaries (which have their own) must link CORE_SRCS without it.
-CORE_SRCS   := $(INCDIR)/Setup.cpp
-DRIVER_SRC  := $(INCDIR)/Driver.cpp
+CORE_SRCS   := $(SOLVERDIR)/Setup.cpp
+DRIVER_SRC  := $(SOLVERDIR)/Driver.cpp
 COMMON_SRCS := $(CORE_SRCS) $(DRIVER_SRC)
 
-COMMON_OBJS    := $(patsubst $(INCDIR)/%.cpp, $(BUILDDIR)/common_%.o, $(COMMON_SRCS))
-OMPCOMMON_OBJS := $(patsubst $(INCDIR)/%.cpp, $(OMPBUILDDIR)/common_%.o, $(COMMON_SRCS))
+COMMON_OBJS    := $(patsubst $(SOLVERDIR)/%.cpp, $(BUILDDIR)/common_%.o, $(COMMON_SRCS))
+OMPCOMMON_OBJS := $(patsubst $(SOLVERDIR)/%.cpp, $(OMPBUILDDIR)/common_%.o, $(COMMON_SRCS))
 
 TEST_SRCS := $(shell find $(TESTDIR) -name '*.cpp')
 TEST_OBJS := $(patsubst $(TESTDIR)/%.cpp, $(TESTBUILDDIR)/%.o, $(TEST_SRCS))
@@ -68,7 +72,7 @@ TEST_PHYSICS_OBJ := $(TESTBUILDDIR)/serial_Physics.o
 
 # Setup.cpp only (geometry/ICs) — the tests call initSimulation() directly,
 # and must NOT link Driver.cpp, which defines its own main().
-TEST_COMMON_OBJS := $(patsubst $(INCDIR)/%.cpp, $(TESTBUILDDIR)/common_%.o, $(CORE_SRCS))
+TEST_COMMON_OBJS := $(patsubst $(SOLVERDIR)/%.cpp, $(TESTBUILDDIR)/common_%.o, $(CORE_SRCS))
 
 # ── Build profiles ─────────────────────────────────────────────────────────────
 RELEASE_FLAGS  := -O3 -DNDEBUG -march=native -funroll-loops
@@ -121,19 +125,19 @@ $(OMP_TARGET): $(OMPOBJS) $(OMPCOMMON_OBJS)
 # ── Compile ────────────────────────────────────────────────────────────────────
 $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) $(SHARED_INC) -I$(SRCDIR) -c $< -o $@
 
-$(BUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(BUILDDIR)
+$(BUILDDIR)/common_%.o: $(SOLVERDIR)/%.cpp | $(BUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) $(SHARED_INC) -I$(SRCDIR) -c $< -o $@
 
 $(OMPBUILDDIR)/%.o: $(OMPSRCDIR)/%.cpp | $(OMPBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -I$(OMPSRCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) $(SHARED_INC) -I$(OMPSRCDIR) -c $< -o $@
 
-$(OMPCOMMON_OBJS): $(OMPBUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(OMPBUILDDIR)
+$(OMPCOMMON_OBJS): $(OMPBUILDDIR)/common_%.o: $(SOLVERDIR)/%.cpp | $(OMPBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -I$(OMPSRCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) $(SHARED_INC) -I$(OMPSRCDIR) -c $< -o $@
 
 $(BUILDDIR):
 	@mkdir -p $(BUILDDIR)
@@ -171,16 +175,16 @@ $(TEST_TARGET): $(TEST_OBJS) $(TEST_PHYSICS_OBJ) $(TEST_COMMON_OBJS)
 $(TESTBUILDDIR)/%.o: $(TESTDIR)/%.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(SRCDIR) -I$(TESTDIR) \
+	$(CXX) $(CXXFLAGS) -O0 -g $(SHARED_INC) -I$(SRCDIR) -I$(TESTDIR) \
 	    -DNAVSOLVER_TEST_DATA_DIR=\"$(CURDIR)/$(TESTDIR)\" -c $< -o $@
 
 $(TEST_PHYSICS_OBJ): $(SRCDIR)/Physics.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -O0 -g $(SHARED_INC) -I$(SRCDIR) -c $< -o $@
 
-$(TEST_COMMON_OBJS): $(TESTBUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(TESTBUILDDIR)
+$(TEST_COMMON_OBJS): $(TESTBUILDDIR)/common_%.o: $(SOLVERDIR)/%.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -O0 -g $(SHARED_INC) -I$(SRCDIR) -c $< -o $@
 
 $(TESTBUILDDIR):
 	@mkdir -p $(TESTBUILDDIR)
@@ -194,4 +198,4 @@ clean:
 -include $(OBJS:.o=.d)
 
 $(BUILDDIR)/%.d: $(SRCDIR)/%.cpp | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -I$(INCDIR) -I$(SRCDIR) -MM -MP -MT $(BUILDDIR)/$*.o -MF $@ $<
+	$(CXX) $(CXXFLAGS) $(SHARED_INC) -I$(SRCDIR) -MM -MP -MT $(BUILDDIR)/$*.o -MF $@ $<

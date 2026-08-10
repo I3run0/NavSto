@@ -1,6 +1,6 @@
 // peak_exp_throughput.cpp — empirical std::exp() throughput microbenchmark.
 //
-// computeExponentialWeights() (src/serial/Physics.cpp) is ~13% of profiled
+// computeExponentialWeights() (src/backends/serial/Physics.cpp) is ~13% of profiled
 // wall time over 60M+ calls per 100 steps, dominated by std::exp() in its
 // dominant branch (Bernstein-Crank formula, |DPe| in [0.1, 200]). glibc's
 // scalar exp() is not auto-vectorized here (no SVML/-ffast-math), so this

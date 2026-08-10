@@ -2,7 +2,7 @@
 // =============================================================================
 //  BackendConfig.hpp (OpenMP) — this backend's storage and working memory.
 //
-//  See src/serial/BackendConfig.hpp for the mechanism. Extras carries what only
+//  See src/backends/serial/BackendConfig.hpp for the mechanism. Extras carries what only
 //  this backend needs: one scratch slice per thread, and the red-black row list
 //  its parallel pressure solve iterates.
 // =============================================================================

@@ -2,9 +2,9 @@
 // =============================================================================
 //  DeviceState.cuh  —  Device-resident mirror of SimState for the CUDA port.
 //
-//  Deliberately a SEPARATE struct from src/common/SimState.hpp rather than
+//  Deliberately a SEPARATE struct from src/core/SimState.hpp rather than
 //  adding device pointers directly to it: keeps the CPU serial/OpenMP builds
-//  (src/common/, src/serial/, src/openmp/) completely untouched, and matches
+//  (src/core/, src/backends/serial/, src/backends/openmp/) completely untouched, and matches
 //  this phase's "CMake-only, additive" build-system approach (see
 //  docs/cuda-port.md). Built once from a host SimState right after
 //  initSimulation() runs (geometry is fixed for the rest of the run, same
@@ -42,7 +42,7 @@
 /// cost ~numCellsZ/2x fewer threads, hurting occupancy) — so
 /// buildDeviceState() expands s.activeRows into per-cell red/black lists
 /// on the host before uploading, replicating the exact k-parity/stride
-/// formula src/openmp/Physics.cpp's updateColor() uses.
+/// formula src/backends/openmp/Physics.cpp's updateColor() uses.
 struct DeviceCellIndex { int i, j, k; };
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ struct DeviceState {
     int numPressureIter = 0;
 
     // Pressure reference-node pin (fixed once geometry is known — see
-    // solvePressurePoisson's iRef/jRef/kRef in src/serial/Physics.cpp).
+    // solvePressurePoisson's iRef/jRef/kRef in src/backends/serial/Physics.cpp).
     int iRef = 0, jRef = 0, kRef = 0;
 
     // Exact active-cell counts for RMS/divergence norms — computed once

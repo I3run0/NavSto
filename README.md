@@ -25,7 +25,8 @@ make test
 make validate
 ```
 
-Requires **g++ ≥ 9** (or clang++ ≥ 10) with C++17 support.  No external
+Requires **g++ ≥ 10** (or clang++ ≥ 12) with C++20 support (concepts — see
+`src/core/FieldStorage.hpp`).  No external
 libraries are needed.
 
 A `CMakeLists.txt` is also provided (`cmake -S . -B build && cmake --build build
@@ -65,6 +66,24 @@ instrumentation overhead distorts it, especially for high-call-count
 functions; use `make bench` (a clean `-O3` build) for that instead. See
 [`docs/serial-optimization.md`](docs/serial-optimization.md) for a full
 profiling pass with real before/after numbers.
+
+### Per-kernel timing
+
+`gprof` answers "which function"; this answers "which of the seven per-step
+operators, and by how much" — the question you actually ask when tuning one
+backend.
+
+```bash
+make kprofile          # serial       (or: cmake -DNAVSOLVER_PROFILE=ON)
+make kprofile-openmp   # OpenMP
+./navsolver <config>   # table in the log + <runName>_kernels.csv
+```
+
+Off by default and zero-cost when off. Profiled **totals** are not comparable
+to a normal build — the CUDA timer synchronizes per kernel, which serializes
+work the GPU would overlap. The per-kernel **shares** are the point; take
+end-to-end numbers from an uninstrumented build. See
+[`src/io/KernelTimers.hpp`](src/io/KernelTimers.hpp).
 
 ## Documentation index
 
@@ -192,13 +211,16 @@ Edit `config_re100_expansion.cfg`.  All keys and allowed values:
 
 ```
 NavSolver/
-├── src/                        # C++ code only
-│   ├── common/                 # Shared by all backends: geometry + initial
-│   │                           # conditions (Setup.cpp), state, config, logging, VTK
-│   ├── serial/                 # Serial CPU: AoS layout, simple loops
-│   ├── openmp/                 # OpenMP: red-black pressure solve, per-thread scratch
-│   ├── cuda/                   # CUDA: one thread per plane/cell, red-black pressure solve
-│   └── mpi_cuda/               # (planned) MPI+CUDA: 1D decomposition, halo exchange
+├── src/
+│   ├── core/                   # what a backend is built FROM: SimConfig,
+│   │                           # SimState, GridField, FieldStorage, Physics.hpp
+│   ├── solver/                 # shared physics + the program: Setup.cpp
+│   │                           # (geometry/ICs), Driver.cpp (main + time loops)
+│   ├── io/                     # ConfigParser, VtkExporter, Logger, KernelTimers
+│   └── backends/               # each owns its layout, working set and kernels
+│       ├── serial/             #   BackendConfig.hpp + Physics.cpp
+│       ├── openmp/             #   + red-black rows, per-thread scratch
+│       └── cuda/               #   + DeviceState, own Driver.cu
 │
 ├── experiments/                # Self-contained experiments
 │   ├── configs/                # All .cfg files (Re=100, Re=500, scaling, etc.)

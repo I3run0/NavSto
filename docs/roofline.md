@@ -30,7 +30,7 @@ distinction. Three pieces, each independently reproducible:
    spec sheets) via `scripts/roofline/*.cpp`, compiled with the project's
    own Release flags (`-O3 -march=native -funroll-loops`).
 2. **Analytical FLOP/byte/exp-call counts**, hand-derived from
-   `src/serial/Physics.cpp`, transcribed as constants at the top of
+   `src/backends/serial/Physics.cpp`, transcribed as constants at the top of
    `scripts/roofline.py`.
 3. **Achieved performance**: a clean `-O3` Release build's total wall-clock
    time (never the `-pg` build — confirmed in the prior serial-optimization
@@ -65,7 +65,7 @@ worth remembering when interpreting Phase 3's scaling curves; a
 memory-bound kernel scaling poorly with threads here would confirm this,
 not indicate a bug in the parallelization.
 
-## Analytical per-cell counts (hand-derived from `src/serial/Physics.cpp`)
+## Analytical per-cell counts (hand-derived from `src/backends/serial/Physics.cpp`)
 
 **`computeAccelerations`** (summed across all 3 direction sweeps, treated
 as structurally equal cost — X/Y/Z differ only in which velocity component

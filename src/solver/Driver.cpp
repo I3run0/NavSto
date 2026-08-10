@@ -7,7 +7,7 @@
 //  it dispatches to are what differ, selected at link time.
 //
 //  A backend whose loop genuinely differs opts out instead of branching here;
-//  src/cuda/main.cu does exactly that.
+//  src/backends/cuda/Driver.cu does exactly that.
 //
 //  Usage: ./navsolver [config.cfg]   (defaults if omitted)
 //  Outputs: <outputDir>/<runName>_t*.vtk, _convergence.csv, .cfg; navsolver.log
@@ -264,7 +264,7 @@ int main(int argc, char* argv[])
     LOG_INFO("  Convergence  → ", (s.cfg.outputDir / (s.cfg.runName + "_convergence.csv")).string());
 
 #if NAVSOLVER_PROFILE_ENABLED
-    // Profiling build only — see src/common/KernelTimers.hpp, in particular
+    // Profiling build only — see src/io/KernelTimers.hpp, in particular
     // why total runtime here is NOT comparable to a normal build's.
     {
         const auto csv = s.cfg.outputDir / (s.cfg.runName + "_kernels.csv");
