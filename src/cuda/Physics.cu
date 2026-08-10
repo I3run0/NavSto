@@ -11,7 +11,7 @@
 //      stays a sequential per-thread loop — it's a genuine recurrence along
 //      that axis; the two perpendicular axes parallelize across threads).
 //    - solvePressurePoisson: one CUDA thread per active cell of one color
-//      (red or black), reusing src/common/RedBlackIndexing.hpp's index
+//      (red or black), reusing src/common/Geometry.hpp's index
 //      lists built once on the host and uploaded.
 //    - Everything else in the per-step loop (buildPressureSource,
 //      updateVelocities, computeMomentumResidual, computeDivergence,
@@ -70,15 +70,21 @@ DeviceCellIndex* uploadCells(const std::vector<DeviceCellIndex>& v) {
     return p;
 }
 
-// Expands s.activeRows (one (i,j) row, used for both colors — see
-// RedBlackIndexing.hpp) into a per-cell list for `wantParity`, replicating
+// Expands an active-row list (one (i,j) row, used for both colors — see
+// Geometry.hpp) into a per-cell list for `wantParity`, replicating
 // src/openmp/Physics.cpp's updateColor() k-parity/stride formula exactly:
 // kStart is the smallest k in {1,2} with (i+j+k) parity == wantParity,
 // step 2 covers the rest of [1, numCellsZ].
-std::vector<DeviceCellIndex> expandRowsToCells(const SimState& s, int wantParity) {
+//
+// This is the per-cell layout the GPU wants, derived from the row layout
+// the CPU wants -- the same logical data in two different shapes, which is
+// why buildActiveRows() returns a value rather than storing one.
+std::vector<DeviceCellIndex> expandRowsToCells(const SimState& s,
+                                                const std::vector<RowIndex>& activeRows,
+                                                int wantParity) {
     std::vector<DeviceCellIndex> cells;
-    cells.reserve(s.activeRows.size() * (s.cfg.numCellsZ / 2 + 1));
-    for (const auto& row : s.activeRows) {
+    cells.reserve(activeRows.size() * (s.cfg.numCellsZ / 2 + 1));
+    for (const auto& row : activeRows) {
         const int kStart = (((row.i + row.j) % 2) == wantParity) ? 2 : 1;
         for (int k = kStart; k <= s.cfg.numCellsZ; k += 2) {
             cells.push_back(DeviceCellIndex{row.i, row.j, k});
@@ -125,9 +131,9 @@ DeviceState buildDeviceState(SimState& s) {
     d.jLow = uploadInts(s.jLow);
     d.jHigh = uploadInts(s.jHigh);
 
-    if (!s.redBlackBuilt) { buildRedBlackIndices(s); s.redBlackBuilt = true; }
-    const std::vector<DeviceCellIndex> redCells = expandRowsToCells(s, /*wantParity=*/0);
-    const std::vector<DeviceCellIndex> blackCells = expandRowsToCells(s, /*wantParity=*/1);
+    const std::vector<RowIndex> activeRows = buildActiveRows(s);
+    const std::vector<DeviceCellIndex> redCells = expandRowsToCells(s, activeRows, /*wantParity=*/0);
+    const std::vector<DeviceCellIndex> blackCells = expandRowsToCells(s, activeRows, /*wantParity=*/1);
     d.redCells = uploadCells(redCells);
     d.blackCells = uploadCells(blackCells);
     d.nRed = (int)redCells.size();

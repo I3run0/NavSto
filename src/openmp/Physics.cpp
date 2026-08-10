@@ -24,7 +24,7 @@
 
 #include "Physics.hpp"
 #include "Logger.hpp"
-#include "RedBlackIndexing.hpp"
+#include "Geometry.hpp"
 #include "ViscosityModel.hpp"
 
 #include <cmath>
@@ -220,25 +220,25 @@ enum class RBColor { Red, Black };
 /// MUST be called from inside an enclosing `#pragma omp parallel` region
 /// (see solvePressurePoisson) -- the `#pragma omp for` below is an
 /// orphaned worksharing construct, standard OpenMP, binds to whatever team
-/// is currently active. Iterates s.activeRows (one (i,j) row list drives
-/// BOTH colors -- see RedBlackIndexing.hpp) with a direct strided inner
+/// is currently active. Iterates the caller's active-row list (one (i,j)
+/// row list drives BOTH colors -- see Geometry.hpp) with a direct strided inner
 /// k-loop instead of dereferencing a per-cell index list: replaces a
 /// gather (defeats prefetching) with unit-stride-2 access, which is what
 /// the roofline's "5% of bandwidth ceiling despite low AI" finding pointed
 /// at (latency-bound via indirection, not bandwidth-bound).
-void updateColor(SimState& s, RBColor color,
+void updateColor(SimState& s, const std::vector<RowIndex>& activeRows, RBColor color,
                   double cX, double cY, double cZ, double invDiag,
                   int iRef, int jRef, int kRef, double pRef) {
     const auto& cfg = s.cfg;
-    const long n = static_cast<long>(s.activeRows.size());
+    const long n = static_cast<long>(activeRows.size());
     const int wantParity = (color == RBColor::Red) ? 0 : 1;
     // schedule(static): deterministic at a fixed thread count (needed by
     // scripts/validate_parallel.py's determinism check). Per-row cost is
     // uniform (~numCellsZ/2 cells each), no reason to prefer dynamic.
     #pragma omp for schedule(static)
     for (long idx = 0; idx < n; ++idx) {
-        const int i = s.activeRows[idx].i;
-        const int j = s.activeRows[idx].j;
+        const int i = activeRows[idx].i;
+        const int j = activeRows[idx].j;
         const int im = i-1, ip = i+1, jm = j-1, jp = j+1;
         // (i+j+k) even => red. kStart is the smallest k in [1,2] with the
         // right (i+j+k) parity for this color; step 2 covers the rest.
@@ -298,7 +298,7 @@ void computeAccelerations(SimState& s)
 
     // Same offset convention as VM, but for the X-sweep's 2-D (i,k) scratch:
     // logical i -> physical i+1 (as VM), k (1..KKfim) -> physical k-1.
-    const int kStride = s.scratchKLen;
+    const int kStride = s.ext.accel.scratchKLen;
     auto VM2 = [kStride](double* v, int iLogical, int k) -> double& {
         return v[static_cast<std::size_t>(iLogical + 1) * kStride + (k - 1)];
     };
@@ -318,26 +318,26 @@ void computeAccelerations(SimState& s)
 #else
         const int tid = 0;
 #endif
-        double* ppin = s.ppin.data() + tid * s.scratchLenPerThread;
-        double* ppis = s.ppis.data() + tid * s.scratchLenPerThread;
-        double* ppiu = s.ppiu.data() + tid * s.scratchLenPerThread;
-        double* ppid = s.ppid.data() + tid * s.scratchLenPerThread;
-        double* qsin = s.qsin.data() + tid * s.scratchLenPerThread;
-        double* qsiu = s.qsiu.data() + tid * s.scratchLenPerThread;
-        double* Ku   = s.Ku.data()   + tid * s.scratchLenPerThread;
-        double* Kv   = s.Kv.data()   + tid * s.scratchLenPerThread;
-        double* Kw   = s.Kw.data()   + tid * s.scratchLenPerThread;
+        double* ppin = s.ext.accel.ppin.data() + tid * s.ext.accel.scratchLenPerThread;
+        double* ppis = s.ext.accel.ppis.data() + tid * s.ext.accel.scratchLenPerThread;
+        double* ppiu = s.ext.accel.ppiu.data() + tid * s.ext.accel.scratchLenPerThread;
+        double* ppid = s.ext.accel.ppid.data() + tid * s.ext.accel.scratchLenPerThread;
+        double* qsin = s.ext.accel.qsin.data() + tid * s.ext.accel.scratchLenPerThread;
+        double* qsiu = s.ext.accel.qsiu.data() + tid * s.ext.accel.scratchLenPerThread;
+        double* Ku   = s.ext.accel.Ku.data()   + tid * s.ext.accel.scratchLenPerThread;
+        double* Kv   = s.ext.accel.Kv.data()   + tid * s.ext.accel.scratchLenPerThread;
+        double* Kw   = s.ext.accel.Kw.data()   + tid * s.ext.accel.scratchLenPerThread;
 
         // X-sweep-only 2-D (i,k) scratch — see SimState.hpp field comments
         // and docs/serial-optimization-loop-order.md. Replaces the 1-D
         // ppie/ppiw/qsie buffers (and this sweep's private use of Ku/Kv/Kw,
         // which the Y/Z sweeps below still use in their own 1-D slices).
-        double* ppieXK = s.ppieXK.data() + tid * s.xk2DLenPerThread;
-        double* ppiwXK = s.ppiwXK.data() + tid * s.xk2DLenPerThread;
-        double* qsieXK = s.qsieXK.data() + tid * s.xk2DLenPerThread;
-        double* KuXK   = s.KuXK.data()   + tid * s.xk2DLenPerThread;
-        double* KvXK   = s.KvXK.data()   + tid * s.xk2DLenPerThread;
-        double* KwXK   = s.KwXK.data()   + tid * s.xk2DLenPerThread;
+        double* ppieXK = s.ext.accel.ppieXK.data() + tid * s.ext.accel.xk2DLenPerThread;
+        double* ppiwXK = s.ext.accel.ppiwXK.data() + tid * s.ext.accel.xk2DLenPerThread;
+        double* qsieXK = s.ext.accel.qsieXK.data() + tid * s.ext.accel.xk2DLenPerThread;
+        double* KuXK   = s.ext.accel.KuXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
+        double* KvXK   = s.ext.accel.KvXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
+        double* KwXK   = s.ext.accel.KwXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
 
     // ---------- Direction X ----------
     // Restructured (docs/serial-optimization-loop-order.md) to loop
@@ -643,7 +643,7 @@ void buildPressureSource(SimState& s)
 //  dependency (each cell reads a same-sweep-updated neighbor), which can't
 //  be correctly parallelized as-is. Red-black splits cells by (i+j+k)
 //  parity so each color's update is embarrassingly parallel -- see
-//  RedBlackIndexing.hpp and mirrorGhostCells()/updateColor() above.
+//  Geometry.hpp and mirrorGhostCells()/updateColor() above.
 //  Converges to the SAME fixed point as the serial version via a
 //  DIFFERENT iteration path (not identical intermediate values) --
 //  verified via scripts/validate.py's red-black tier, not a golden-field
@@ -677,18 +677,21 @@ void solvePressurePoisson(SimState& s)
     const int kRef = (cfg.numCellsZ + 1) / 2;
     const double pRef = s.press(iRef, jRef, kRef);
 
-    if (!s.redBlackBuilt) {
-        buildRedBlackIndices(s);
-        s.redBlackBuilt = true;
-    }
+    // Built once and reused for the run — geometry is fixed after
+    // initSimulation(). The list, and this guard, live in THIS backend's
+    // Extras (src/openmp/BackendConfig.hpp); SimState used to carry both for
+    // every backend, with a separate `redBlackBuilt` bool that emptiness
+    // makes redundant.
+    if (s.ext.activeRows.empty())
+        s.ext.activeRows = buildActiveRows(s);
 
     #pragma omp parallel
     {
         for (int sweep = 0; sweep < cfg.numPressureIter; ++sweep) {
             mirrorGhostCells(s);
-            updateColor(s, RBColor::Red, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
+            updateColor(s, s.ext.activeRows, RBColor::Red, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
             mirrorGhostCells(s);
-            updateColor(s, RBColor::Black, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
+            updateColor(s, s.ext.activeRows, RBColor::Black, cX, cY, cZ, invDiag, iRef, jRef, kRef, pRef);
         }
     }
 }

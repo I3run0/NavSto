@@ -62,8 +62,8 @@ __device__ __forceinline__ double effectiveInvRe(const DeviceState& d, int i) {
 
 // ── Active-domain bound helpers — kept in sync BY HAND with
 //    src/serial/Physics.cpp's buildPressureSource/computeDivergence (jS/jN)
-//    and solvePressurePoisson/RedBlackIndexing.hpp's ghost-mirror bounds
-//    (jLoopS/jLoopN), exactly like RedBlackIndexing.hpp already documents
+//    and solvePressurePoisson/Geometry.hpp's ghost-mirror bounds
+//    (jLoopS/jLoopN), exactly like Geometry.hpp already documents
 //    doing for the CPU paths. ──────────────────────────────────────────────
 __device__ __forceinline__ void activeJRange(const DeviceState& d, int i, int& jS, int& jN) {
     const int im = i - 1;

@@ -16,7 +16,9 @@ set(COMMON_SRCS ${INCDIR}/Setup.cpp)
 
 add_executable(navsolver ${SRCS} ${COMMON_SRCS})
 
-target_include_directories(navsolver PRIVATE ${INCDIR})
+# ${SRCDIR} first-class on the include path: SimState.hpp includes
+# "BackendConfig.hpp", which must resolve to THIS backend's copy.
+target_include_directories(navsolver PRIVATE ${INCDIR} ${SRCDIR})
 
 target_compile_options(navsolver PRIVATE
     -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
@@ -61,7 +63,7 @@ if(OpenMP_CXX_FOUND)
 
     add_executable(navsolver_omp ${OMPSRCS} ${COMMON_SRCS})
 
-    target_include_directories(navsolver_omp PRIVATE ${INCDIR})
+    target_include_directories(navsolver_omp PRIVATE ${INCDIR} ${OMPSRCDIR})
 
     target_compile_options(navsolver_omp PRIVATE
         -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
@@ -124,6 +126,7 @@ add_executable(navsolver_tests ${TEST_SRCS} ${SRCDIR}/Physics.cpp ${COMMON_SRCS}
 
 target_include_directories(navsolver_tests PRIVATE
     ${INCDIR}
+    ${SRCDIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
 )
 
@@ -151,6 +154,7 @@ if(OpenMP_CXX_FOUND)
 
     target_include_directories(navsolver_tests_omp PRIVATE
         ${INCDIR}
+        ${OMPSRCDIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests
     )
 

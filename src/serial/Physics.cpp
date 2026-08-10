@@ -115,31 +115,32 @@ void computeAccelerations(SimState& s)
     s.accelZ.fill(0.0);
 
     // Temporary 1‑D arrays (logical index -1 .. maxDim+1) offset by +1.
-    // Sized maxDim+3 (not maxDim+2) in SimState::allocateFields(): several
+    // Sized maxDim+3 (not maxDim+2) in AccelScratch::allocate(): several
     // writes below reach logical index maxDim+1 (e.g. VM(ppiw, i+2) at
     // i==iEnd-1==maxDim-1, and the VM(Ku, iEnd+1)/VM(Ku, jEnd+1)/
     // VM(Ku, numCellsZ+1) boundary extrapolations), which needs physical
-    // slot maxDim+2. Owned by SimState and reused across calls instead of
-    // being allocated fresh every call — see the field comments there for
-    // why that's safe without re-zeroing.
-    auto& ppin = s.ppin; auto& ppis = s.ppis;
-    auto& ppiu = s.ppiu; auto& ppid = s.ppid;
-    auto& qsin = s.qsin; auto& qsiu = s.qsiu;
-    auto& Ku = s.Ku; auto& Kv = s.Kv; auto& Kw = s.Kw;
+    // slot maxDim+2. Owned by SimState's backend Extras and reused across calls
+    // instead of being allocated fresh every call — see AccelScratch.hpp for why
+    // that's safe without re-zeroing.
+    auto& ppin = s.ext.accel.ppin; auto& ppis = s.ext.accel.ppis;
+    auto& ppiu = s.ext.accel.ppiu; auto& ppid = s.ext.accel.ppid;
+    auto& qsin = s.ext.accel.qsin; auto& qsiu = s.ext.accel.qsiu;
+    auto& Ku = s.ext.accel.Ku; auto& Kv = s.ext.accel.Kv; auto& Kw = s.ext.accel.Kw;
 
-    // X-sweep-only 2-D (i,k) scratch — see SimState.hpp field comments and
-    // docs/serial-optimization-loop-order.md. Replaces the 1-D
+    // X-sweep-only 2-D (i,k) scratch — see AccelScratch.hpp field comments
+    // and docs/serial-optimization-loop-order.md. Replaces the 1-D
     // ppie/ppiw/qsie buffers (and this sweep's private use of Ku/Kv/Kw,
     // which the Y/Z sweeps below still use in their original 1-D form).
-    auto& ppieXK = s.ppieXK; auto& ppiwXK = s.ppiwXK; auto& qsieXK = s.qsieXK;
-    auto& KuXK = s.KuXK; auto& KvXK = s.KvXK; auto& KwXK = s.KwXK;
+    auto& ppieXK = s.ext.accel.ppieXK; auto& ppiwXK = s.ext.accel.ppiwXK;
+    auto& qsieXK = s.ext.accel.qsieXK;
+    auto& KuXK = s.ext.accel.KuXK; auto& KvXK = s.ext.accel.KvXK; auto& KwXK = s.ext.accel.KwXK;
 
     // Helper to access offset arrays (logical idx -> physical idx+1)
     auto VM = [](std::vector<double>& v, int idx) -> double& { return v[idx+1]; };
 
     // Same offset convention as VM, but for the X-sweep's 2-D (i,k) scratch:
     // logical i -> physical i+1 (as VM), k (1..KKfim) -> physical k-1.
-    const int kStride = s.scratchKLen;
+    const int kStride = s.ext.accel.scratchKLen;
     auto VM2 = [kStride](std::vector<double>& v, int iLogical, int k) -> double& {
         return v[static_cast<std::size_t>(iLogical + 1) * kStride + (k - 1)];
     };

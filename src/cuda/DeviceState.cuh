@@ -8,7 +8,7 @@
 //  this phase's "CMake-only, additive" build-system approach (see
 //  docs/cuda-port.md). Built once from a host SimState right after
 //  initSimulation() runs (geometry is fixed for the rest of the run, same
-//  assumption RedBlackIndexing.hpp already relies on); freed at process exit.
+//  assumption Geometry.hpp already relies on); freed at process exit.
 //
 //  Field layout matches GridField<T>'s flat (i*sJ+j)*sK+k indexing exactly
 //  (see GridField.hpp), so uploading/downloading a whole field is a single
@@ -16,7 +16,7 @@
 // =============================================================================
 
 #include "SimState.hpp"
-#include "RedBlackIndexing.hpp"
+#include "Geometry.hpp"
 
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -33,7 +33,7 @@
     } while (0)
 
 /// One (i,j,k) cell reference on the device. The host side no longer
-/// stores a per-cell red/black list (SimState.hpp's RedBlackIndexing.hpp
+/// stores a per-cell red/black list (Geometry.hpp's
 /// v2 stores s.activeRows, one (i,j) ROW per active row, used for both
 /// colors via a strided k-loop — see that file's comment) since a
 /// gather-per-cell was found to be latency-bound on the CPU. CUDA still
@@ -127,7 +127,7 @@ struct DeviceState {
 };
 
 /// Builds a DeviceState from a fully-initialised host SimState (must be
-/// called AFTER initSimulation() + buildRedBlackIndices()), allocating and
+/// called AFTER initSimulation() + buildActiveRows()), allocating and
 /// uploading every field/index array. Caller owns the returned DeviceState
 /// and must pass it to freeDeviceState() when done.
 DeviceState buildDeviceState(SimState& s);

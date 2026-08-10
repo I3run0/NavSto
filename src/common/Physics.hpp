@@ -12,6 +12,12 @@
 // ── UNIFAES helpers (internal linkage in Physics.cpp) ──────────────────────
 // Not declared here; used only inside Physics.cpp.
 
+// Every function below takes SimState& and nothing else. SimState already
+// carries this backend's private working memory as `s.ext`, and its fields
+// already use this backend's storage type -- both chosen in its own
+// BackendConfig.hpp, so a backend can be retuned without touching a single
+// signature here. See SimState.hpp.
+
 // ── Initialisation ──────────────────────────────────────────────────────────
 
 /// Set up geometry arrays (jLow/jHigh/iLow/iHigh), fill initial velocity and
@@ -21,12 +27,15 @@ void initSimulation(SimState& s);
 // ── Per-step operators ──────────────────────────────────────────────────────
 
 /// Recompute UNIFAES advective + viscous accelerations (accelX/Y/Z).
+/// Uses this backend's coefficient scratch (`s.ext`).
 void computeAccelerations(SimState& s);
 
 /// Build the RHS of the pressure Poisson equation: S = ∇·u/dt + ∇·A.
 void buildPressureSource(SimState& s);
 
-/// Solve ∇²p = S by Gauss-Seidel iteration.
+/// Solve ∇²p = S iteratively. Parallel backends drive the sweep from a
+/// precomputed index list in `s.ext`; the serial Gauss-Seidel implementation
+/// has a loop-carried dependency and keeps no such list at all.
 void solvePressurePoisson(SimState& s);
 
 /// Projection step: u_new = u_old + dt*(A - ∇p).

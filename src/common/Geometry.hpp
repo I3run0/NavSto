@@ -1,7 +1,18 @@
 #pragma once
 // =============================================================================
-//  RedBlackIndexing.hpp — precomputed active-row list for checkerboard
-//  (red-black) SOR.
+//  Geometry.hpp — derived-geometry queries over an initialised SimState.
+//
+//  Everything here is a pure function of geometry that initSimulation() has
+//  already fixed for the run. Nothing here is state: results are returned by
+//  value, and whichever backend wants them stores them in its own Workspace,
+//  in whatever layout suits it. buildActiveRows() used to write into
+//  SimState::activeRows -- OpenMP-only data (the serial solver left it empty)
+//  parked in the shared state struct because there was nowhere else to put
+//  it, and which the CUDA backend then had to re-expand into a per-cell list
+//  anyway. Two backends wanting the same logical data in two different
+//  layouts is exactly why this returns a value instead of owning one.
+//
+//  ── Active-row list for checkerboard (red-black) SOR ──
 //
 //  Plain Gauss-Seidel/SOR (src/serial/Physics.cpp's solvePressurePoisson)
 //  has a genuine loop-carried dependency: each cell's update reads a
@@ -45,18 +56,20 @@
 //  hand — see that function if this ever needs updating).
 // =============================================================================
 
+#include "RowIndex.hpp"
 #include "SimState.hpp"
 
 #include <cstddef>
+#include <vector>
 
-/// Fills s.activeRows for solvePressurePoisson's active interior domain
-/// (i in [1,numCellsX], j in the per-i active span — identical bounds
-/// logic to solvePressurePoisson's own loop). Call once after
-/// initSimulation(), reuse for the run — idempotent guard is the caller's
-/// responsibility (see s.redBlackBuilt).
-inline void buildRedBlackIndices(SimState& s) {
+/// Returns the active-row list for solvePressurePoisson's interior domain
+/// (i in [1,numCellsX], j in the per-i active span — identical bounds logic
+/// to solvePressurePoisson's own loop). Geometry is fixed once
+/// initSimulation() has run, so callers build this once and reuse it for the
+/// whole run; call it after initSimulation(), never before.
+inline std::vector<RowIndex> buildActiveRows(const SimState& s) {
     const auto& cfg = s.cfg;
-    s.activeRows.clear();
+    std::vector<RowIndex> activeRows;
 
     // Conservative capacity estimate to avoid reallocation during the
     // push_back loop below; the real active-row count is smaller for a
@@ -64,7 +77,7 @@ inline void buildRedBlackIndices(SimState& s) {
     const std::size_t capacity =
         static_cast<std::size_t>(cfg.numCellsX) *
         static_cast<std::size_t>(cfg.numCellsY) + 1;
-    s.activeRows.reserve(capacity);
+    activeRows.reserve(capacity);
 
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         const int im = i - 1;
@@ -76,7 +89,9 @@ inline void buildRedBlackIndices(SimState& s) {
         if (i == s.degreeIndex2) { jLoopS = s.jLow[im]+1; jLoopN = s.jHigh[im]; }
 
         for (int j = jLoopS; j <= jLoopN; ++j) {
-            s.activeRows.push_back(RowIndex{i, j});
+            activeRows.push_back(RowIndex{i, j});
         }
     }
+
+    return activeRows;
 }

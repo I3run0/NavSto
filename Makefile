@@ -102,19 +102,19 @@ $(OMP_TARGET): $(OMPOBJS) $(OMPCOMMON_OBJS)
 # ── Compile ────────────────────────────────────────────────────────────────────
 $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
 
 $(BUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(BUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(EXTRA_FLAGS) -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
 
 $(OMPBUILDDIR)/%.o: $(OMPSRCDIR)/%.cpp | $(OMPBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -I$(OMPSRCDIR) -c $< -o $@
 
 $(OMPCOMMON_OBJS): $(OMPBUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(OMPBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(OMP_FLAGS) -I$(INCDIR) -I$(OMPSRCDIR) -c $< -o $@
 
 $(BUILDDIR):
 	@mkdir -p $(BUILDDIR)
@@ -152,16 +152,16 @@ $(TEST_TARGET): $(TEST_OBJS) $(TEST_PHYSICS_OBJ) $(TEST_COMMON_OBJS)
 $(TESTBUILDDIR)/%.o: $(TESTDIR)/%.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(TESTDIR) \
+	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(SRCDIR) -I$(TESTDIR) \
 	    -DNAVSOLVER_TEST_DATA_DIR=\"$(CURDIR)/$(TESTDIR)\" -c $< -o $@
 
 $(TEST_PHYSICS_OBJ): $(SRCDIR)/Physics.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
 
 $(TEST_COMMON_OBJS): $(TESTBUILDDIR)/common_%.o: $(INCDIR)/%.cpp | $(TESTBUILDDIR)
 	@echo "  CXX   $<"
-	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -O0 -g -I$(INCDIR) -I$(SRCDIR) -c $< -o $@
 
 $(TESTBUILDDIR):
 	@mkdir -p $(TESTBUILDDIR)
@@ -175,4 +175,4 @@ clean:
 -include $(OBJS:.o=.d)
 
 $(BUILDDIR)/%.d: $(SRCDIR)/%.cpp | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -I$(INCDIR) -MM -MP -MT $(BUILDDIR)/$*.o -MF $@ $<
+	$(CXX) $(CXXFLAGS) -I$(INCDIR) -I$(SRCDIR) -MM -MP -MT $(BUILDDIR)/$*.o -MF $@ $<
