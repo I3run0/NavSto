@@ -9,6 +9,19 @@ under `[Unreleased]`.
 
 ## [Unreleased]
 
+### Removed
+- **The hand-rolled `Makefile`.** Two build systems had to be kept in step by
+  hand and had already diverged — CUDA was CMake-only (mixed C++/CUDA linking
+  is not worth reimplementing), so `make` could not build all the targets, and
+  the CI `makefile-build` job duplicated what the CMake job already ran.
+  Everything it offered has a CMake equivalent: `run` and `check` targets,
+  `-DCMAKE_BUILD_TYPE=Debug` for the sanitizer build, `-DNAVSOLVER_PROFILE=ON`
+  for per-kernel timing, and new `bench` / `validate_physics` /
+  `validate_parallel` / `validate_cuda` targets alongside the ctest
+  registrations. `scripts/validate.py` and `scripts/benchmark.py` now drive
+  CMake, and `NAVSOLVER_BIN_DIR` defaults to `build/` rather than the repo
+  root, where `make` used to drop binaries.
+
 ### Added
 - **CUDA `mirrorGhostCells` parallelized**: ported the OpenMP two-pass
   cross-row/same-row split (`src/openmp/Physics.cpp`) to two CUDA kernels

@@ -8,35 +8,39 @@ See [`CHANGELOG.md`](CHANGELOG.md) for notable changes, including known issues.
 
 ## Build
 
-```bash
-# Release (optimised)
-make
+CMake is the only build system; every target below comes from one configure.
 
-# Debug + AddressSanitizer
-make debug
+```bash
+# Release (optimised) — builds navsolver, navsolver_omp, navsolver_cuda
+# and the test binaries, skipping whatever this machine's toolchain lacks
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+# Debug + AddressSanitizer/UBSan (bounds checking ACTIVE)
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug -j
 
 # Run with example config
-./navsolver config_re100_expansion.cfg
+./build/navsolver experiments/configs/config_re960_expansion.cfg
 
-# Unit tests
-make test
+# Unit tests + solver-level validation
+ctest --test-dir build --output-on-failure
 
-# Physics correctness checks (conservation + analytical Poiseuille check)
-make validate
+# Or one validation script on its own
+cmake --build build --target validate_physics    # conservation + Poiseuille
+cmake --build build --target validate_parallel   # thread-count equivalence
+cmake --build build --target validate_cuda       # GPU equivalence + determinism
 ```
 
 Requires **g++ ≥ 10** (or clang++ ≥ 12) with C++20 support (concepts — see
-`src/core/FieldStorage.hpp`).  No external
-libraries are needed.
-
-A `CMakeLists.txt` is also provided (`cmake -S . -B build && cmake --build build
-&& ctest --test-dir build`) and mirrors the Makefile's Release/Debug profiles
-plus the `navsolver_tests` target.
+`src/core/FieldStorage.hpp`).  No external libraries are needed. OpenMP and
+CUDA are both optional: configure succeeds without them and simply skips the
+corresponding targets.
 
 ## Benchmarking
 
 ```bash
-make bench
+cmake --build build --target bench
 # or directly:
 python3 scripts/benchmark.py --sizes tiny,small,medium,large --steps 50 --repeats 3
 ```
@@ -54,16 +58,20 @@ and known correctness caveats before optimizing further.
 ## Profiling
 
 ```bash
-make profile                          # -O2 -pg instrumented build
-./navsolver <config>                  # generates gmon.out
-gprof ./navsolver gmon.out | less
+# -O2 -pg instrumented build. -O2, not -O3, and -pg is not in any standard
+# CMAKE_BUILD_TYPE, so this is its own tree rather than a build option.
+cmake -S . -B build-profile -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_FLAGS_RELEASE="-O2 -g -DNDEBUG -pg" -DCMAKE_EXE_LINKER_FLAGS="-pg"
+cmake --build build-profile -j
+./build-profile/navsolver <config>    # generates gmon.out
+gprof ./build-profile/navsolver gmon.out | less
 ```
 
 `-O2` (not `-O3`) keeps function boundaries visible in the call graph —
 `-O3`'s aggressive inlining hides where time is actually spent. Don't use
 the `-pg` build to measure absolute wall-clock time — its per-call
 instrumentation overhead distorts it, especially for high-call-count
-functions; use `make bench` (a clean `-O3` build) for that instead. See
+functions; use the `bench` target (a clean `-O3` build) for that instead. See
 [`docs/serial-optimization.md`](docs/serial-optimization.md) for a full
 profiling pass with real before/after numbers.
 
@@ -74,9 +82,9 @@ operators, and by how much" — the question you actually ask when tuning one
 backend.
 
 ```bash
-make kprofile          # serial       (or: cmake -DNAVSOLVER_PROFILE=ON)
-make kprofile-openmp   # OpenMP
-./navsolver <config>   # table in the log + <runName>_kernels.csv
+cmake -S . -B build-kprof -DCMAKE_BUILD_TYPE=Release -DNAVSOLVER_PROFILE=ON
+cmake --build build-kprof -j          # applies to every backend target
+./build-kprof/navsolver <config>      # table in the log + <runName>_kernels.csv
 ```
 
 Off by default and zero-cost when off. Profiled **totals** are not comparable
@@ -108,8 +116,8 @@ end-to-end numbers from an uninstrumented build. See
   ~1.2-1.3x at 2 threads, declining beyond — matches the roofline's
   memory-bandwidth-saturation prediction).
   ```bash
-  make openmp                                           # navsolver_omp
-  make validate-parallel                                # thread-count equivalence + determinism
+  cmake --build build --target navsolver_omp            # navsolver_omp
+  cmake --build build --target validate_parallel        # thread-count equivalence + determinism
   python3 scripts/benchmark.py --binary navsolver_omp --threads 1,2,4,6,12
   python3 scripts/plot_scaling.py <benchmark_csv>
   ```
@@ -131,7 +139,7 @@ end-to-end numbers from an uninstrumented build. See
 ## Correctness checks
 
 ```bash
-make validate
+cmake --build build --target validate_physics
 # or directly:
 python3 scripts/validate.py
 ```
@@ -156,7 +164,7 @@ Two tiers, both required to pass before trusting a performance number:
 ## Usage
 
 ```
-./navsolver [config.cfg]
+./build/navsolver [config.cfg]
 ```
 
 Without a config file the solver runs with built-in defaults (Re=100,
@@ -228,8 +236,9 @@ NavSolver/
 │   └── notebooks/              # Jupyter for loading results, plotting, comparison
 │
 ├── tests/                      # Unit tests (header-only harness, no deps),
-│                                # wired into `ctest` and `make test`
-├── scripts/                    # benchmark.py (make bench), validate.py (make validate)
+│                                # wired into `ctest`
+├── scripts/                    # benchmark.py, validate*.py — all wired as
+│                                # CMake targets; the validators also as ctest tests
 ├── reference/                  # Legacy Pascal-derived C++ translation
 │                                # (navsto_dynamic.cpp) and validation data,
 │                                # kept for cross-checking the modernized solver
@@ -254,5 +263,5 @@ NavSolver/
 | Configuration | Hard-coded in `main()` | External `.cfg` file + `ConfigParser` |
 | Output format | `.dat` text tables | **VTK Legacy** (ParaView-ready) + CSV convergence history |
 | Error handling | None | `std::exception` + structured logger |
-| Build system | None | `Makefile` with release / debug / sanitizer profiles |
+| Build system | None | CMake: Release/Debug profiles, per-backend targets, `ctest` |
 | Compiler warnings | Unknown | `-Wall -Wextra -Wpedantic -Wshadow` |

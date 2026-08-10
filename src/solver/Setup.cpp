@@ -159,6 +159,7 @@ void buildInitialPressure(SimState& s)
 // ---------------------------------------------------------------------------
 void initSimulation(SimState& s)
 {
+    s.cfg.normalizeDecomposition();
     const auto& cfg = s.cfg;
 
     s.numCellsXm1  = cfg.numCellsX - 1;
@@ -175,82 +176,95 @@ void initSimulation(SimState& s)
     s.pressureSource.fill(0.0);
 
     // ── Geometry: fill jLow/jHigh and iLow/iHigh ────────────────────────────
+    // The shape is a property of the WHOLE domain — a step at global x=GX/12
+    // is at the same physical place however the grid is split — so the switch
+    // below works in global indices and fills global-length arrays. This
+    // rank's window is sliced out afterwards. Undecomposed, GX/GY are the
+    // local sizes and the window is everything.
+    const int GX = cfg.globalNumCellsX;
+    const int GY = cfg.globalNumCellsY;
+
+    s.jLow .assign(GX + 2, 0);
+    s.jHigh.assign(GX + 2, 0);
+    s.iLow .assign(GY + 2, 0);
+    s.iHigh.assign(GY + 2, 0);
+
     // SharpCorner/RoundedCorner derive several index bounds directly from
     // baseUnit (e.g. degreeIndex2 = baseUnit, rampIndexX1 ~= 1.25*baseUnit);
     // if baseUnit isn't kept well below the grid size, those bounds exceed
-    // jLow/jHigh's allocated range (numCellsX+1) and corrupt heap memory.
+    // jLow/jHigh's allocated range (GX+1) and corrupt heap memory.
     // The original Pascal convention keeps baseUnit == numCellsY/2, so
-    // requiring baseUnit <= numCellsY/2 and <= numCellsX/2 stays safely
+    // requiring baseUnit <= GY/2 and <= GX/2 stays safely
     // inside that convention (verified against every checked-in .cfg).
     if (cfg.geometryShape == GeometryShape::SharpCorner ||
         cfg.geometryShape == GeometryShape::RoundedCorner) {
-        if (cfg.baseUnit < 1 || cfg.baseUnit > cfg.numCellsX / 2 ||
-            cfg.baseUnit > cfg.numCellsY / 2) {
+        if (cfg.baseUnit < 1 || cfg.baseUnit > GX / 2 ||
+            cfg.baseUnit > GY / 2) {
             throw std::invalid_argument(
                 "baseUnit=" + std::to_string(cfg.baseUnit) +
-                " is incompatible with grid " + std::to_string(cfg.numCellsX) +
-                "x" + std::to_string(cfg.numCellsY) + " for this geometryShape "
+                " is incompatible with grid " + std::to_string(GX) +
+                "x" + std::to_string(GY) + " for this geometryShape "
                 "(need 1 <= baseUnit <= min(numCellsX, numCellsY)/2)");
         }
     }
 
     switch (cfg.geometryShape) {
     case GeometryShape::AbruptExpansion:
-        s.degreeIndexY = cfg.numCellsY / 2;
-        s.degreeIndex1 = cfg.numCellsX / 12;
-        s.degreeIndex2 = cfg.numCellsX + 2;
-        for (int i = 0; i <= s.degreeIndex1; ++i)  { s.jLow[i] = s.degreeIndexY; s.jHigh[i] = cfg.numCellsY; }
-        for (int i = s.degreeIndex1+1; i <= cfg.numCellsX; ++i) { s.jLow[i] = 0; s.jHigh[i] = cfg.numCellsY; }
+        s.degreeIndexY = GY / 2;
+        s.degreeIndex1 = GX / 12;
+        s.degreeIndex2 = GX + 2;
+        for (int i = 0; i <= s.degreeIndex1; ++i)  { s.jLow[i] = s.degreeIndexY; s.jHigh[i] = GY; }
+        for (int i = s.degreeIndex1+1; i <= GX; ++i) { s.jLow[i] = 0; s.jHigh[i] = GY; }
         for (int j = 0; j <= s.degreeIndexY; ++j)  s.iLow[j] = s.degreeIndex1;
-        for (int j = s.degreeIndexY+1; j <= cfg.numCellsY; ++j) s.iLow[j] = 0;
-        for (int j = 0; j <= cfg.numCellsY; ++j)   s.iHigh[j] = cfg.numCellsX;
+        for (int j = s.degreeIndexY+1; j <= GY; ++j) s.iLow[j] = 0;
+        for (int j = 0; j <= GY; ++j)   s.iHigh[j] = GX;
         break;
 
     case GeometryShape::AbruptContraction:
-        s.jLowInitial  = cfg.numCellsY / 2;
-        s.jHighFinal   = cfg.numCellsY;
+        s.jLowInitial  = GY / 2;
+        s.jHighFinal   = GY;
         s.degreeIndex1 = -1;
         s.degreeIndex2 = 2 * cfg.baseUnit;
         for (int i = 0; i < s.degreeIndex2;  ++i)  { s.jLow[i] = 0;              s.jHigh[i] = s.jHighFinal; }
-        for (int i = s.degreeIndex2; i <= cfg.numCellsX; ++i) { s.jLow[i] = s.jLowInitial; s.jHigh[i] = s.jHighFinal; }
-        for (int j = 0; j <= cfg.numCellsY; ++j)   { s.iLow[j] = 0; s.iHigh[j] = cfg.numCellsX; }
+        for (int i = s.degreeIndex2; i <= GX; ++i) { s.jLow[i] = s.jLowInitial; s.jHigh[i] = s.jHighFinal; }
+        for (int j = 0; j <= GY; ++j)   { s.iLow[j] = 0; s.iHigh[j] = GX; }
         break;
 
     case GeometryShape::SharpCorner:
         s.degreeIndex1 = 0;
         s.degreeIndex2 = cfg.baseUnit;
-        s.degreeIndexY = cfg.numCellsY - cfg.baseUnit;
-        for (int i = 0; i < s.degreeIndex2;  ++i)  { s.jLow[i] = 0; s.jHigh[i] = cfg.numCellsY; }
-        for (int i = s.degreeIndex2; i <= cfg.numCellsX; ++i) { s.jLow[i] = s.degreeIndexY; s.jHigh[i] = cfg.numCellsY; }
-        for (int j = 0; j <= cfg.numCellsY; ++j)   s.iLow[j] = 0;
+        s.degreeIndexY = GY - cfg.baseUnit;
+        for (int i = 0; i < s.degreeIndex2;  ++i)  { s.jLow[i] = 0; s.jHigh[i] = GY; }
+        for (int i = s.degreeIndex2; i <= GX; ++i) { s.jLow[i] = s.degreeIndexY; s.jHigh[i] = GY; }
+        for (int j = 0; j <= GY; ++j)   s.iLow[j] = 0;
         for (int j = 0; j <= s.degreeIndexY; ++j)  s.iHigh[j] = s.degreeIndex2;
-        for (int j = s.degreeIndexY+1; j <= cfg.numCellsY; ++j) s.iHigh[j] = cfg.numCellsX;
+        for (int j = s.degreeIndexY+1; j <= GY; ++j) s.iHigh[j] = GX;
         break;
 
     case GeometryShape::RoundedCorner: {
         s.degreeIndex1 = 0;
         s.degreeIndex2 = cfg.baseUnit;
-        s.degreeIndexY = cfg.numCellsY - cfg.baseUnit;
-        const int jRmp1loc = cfg.numCellsY - 5*cfg.baseUnit/4;
-        s.rampIndexX1  = cfg.numCellsY - jRmp1loc;
+        s.degreeIndexY = GY - cfg.baseUnit;
+        const int jRmp1loc = GY - 5*cfg.baseUnit/4;
+        s.rampIndexX1  = GY - jRmp1loc;
         s.rampIndexY1  = jRmp1loc;
         int jRmp2, iRmp2;
-        if (s.rampIndexY1 < cfg.numCellsY - 6*cfg.baseUnit/10) {
+        if (s.rampIndexY1 < GY - 6*cfg.baseUnit/10) {
             jRmp2 = s.rampIndexY1 - 4*cfg.baseUnit/10;
             iRmp2 = s.degreeIndex2 + s.degreeIndexY - jRmp2;
-        } else { jRmp2 = -2; iRmp2 = cfg.numCellsX + 2; }
+        } else { jRmp2 = -2; iRmp2 = GX + 2; }
         s.rampIndexY2 = jRmp2;
         s.rampIndexX2 = iRmp2;
         for (int i = 0; i < s.degreeIndex2; ++i) s.jLow[i] = 0;
         for (int i = s.degreeIndex2; i <= iRmp2; ++i) s.jLow[i] = jRmp2 + i - s.degreeIndex2;
-        for (int i = iRmp2; i <= cfg.numCellsX; ++i) s.jLow[i] = s.degreeIndexY;
+        for (int i = iRmp2; i <= GX; ++i) s.jLow[i] = s.degreeIndexY;
         for (int i = 0; i <= s.rampIndexX1; ++i) s.jHigh[i] = s.rampIndexY1 + i;
-        for (int i = s.rampIndexX1+1; i <= cfg.numCellsX; ++i) s.jHigh[i] = cfg.numCellsY;
+        for (int i = s.rampIndexX1+1; i <= GX; ++i) s.jHigh[i] = GY;
         for (int j = 0; j <= s.rampIndexY1; ++j) s.iLow[j] = 0;
-        for (int j = s.rampIndexY1+1; j <= cfg.numCellsY; ++j) s.iLow[j] = j - s.rampIndexY1;
+        for (int j = s.rampIndexY1+1; j <= GY; ++j) s.iLow[j] = j - s.rampIndexY1;
         for (int j = 0; j <= jRmp2; ++j) s.iHigh[j] = s.degreeIndex2;
         for (int j = jRmp2+1; j <= s.degreeIndexY; ++j) s.iHigh[j] = s.degreeIndex2 + j - jRmp2;
-        for (int j = s.degreeIndexY+1; j <= cfg.numCellsY; ++j) s.iHigh[j] = cfg.numCellsX;
+        for (int j = s.degreeIndexY+1; j <= GY; ++j) s.iHigh[j] = GX;
         break;
     }
 
@@ -261,11 +275,43 @@ void initSimulation(SimState& s)
         // Poiseuille flow has a closed-form solution only when the channel
         // is straight end-to-end) and as the fallback for shapes not yet
         // implemented (OpenCavity, GradualExpansion, etc).
-        for (int i = 0; i <= cfg.numCellsX; ++i) { s.jLow[i] = 0; s.jHigh[i] = cfg.numCellsY; }
-        for (int j = 0; j <= cfg.numCellsY; ++j) { s.iLow[j] = 0; s.iHigh[j] = cfg.numCellsX; }
-        s.degreeIndex1 = cfg.numCellsX + 1;
-        s.degreeIndex2 = cfg.numCellsX + 2;
+        for (int i = 0; i <= GX; ++i) { s.jLow[i] = 0; s.jHigh[i] = GY; }
+        for (int j = 0; j <= GY; ++j) { s.iLow[j] = 0; s.iHigh[j] = GX; }
+        s.degreeIndex1 = GX + 1;
+        s.degreeIndex2 = GX + 2;
         break;
+    }
+
+    // ── Slice this rank's window out of the global geometry ─────────────────
+    // jLow/jHigh are indexed by i and hold j values; iLow/iHigh are indexed by
+    // j and hold i values — so the first pair shifts by originX in its INDEX
+    // and originY in its VALUE, and the second pair the other way round.
+    // Values are clamped because a rank need not contain the feature they
+    // point at (an inlet step to the left of this slab clamps to 0).
+    //
+    // Undecomposed this is a full-width copy of what the switch just wrote,
+    // which is why every existing backend is bit-identical across it.
+    if (GX != cfg.numCellsX || GY != cfg.numCellsY ||
+        cfg.originX != 0 || cfg.originY != 0) {
+        const std::vector<int> gJLow = s.jLow, gJHigh = s.jHigh;
+        const std::vector<int> gILow = s.iLow, gIHigh = s.iHigh;
+
+        s.jLow .assign(s.g.sI, 0);  s.jHigh.assign(s.g.sI, 0);
+        s.iLow .assign(s.g.sJ, 0);  s.iHigh.assign(s.g.sJ, 0);
+
+        auto clampJ = [&](int v) { return std::clamp(v - cfg.originY, 0, cfg.numCellsY); };
+        auto clampI = [&](int v) { return std::clamp(v - cfg.originX, 0, cfg.numCellsX); };
+
+        for (int i = 0; i <= cfg.numCellsX; ++i) {
+            const int gi = cfg.originX + i;
+            s.jLow [i] = clampJ(gJLow [gi]);
+            s.jHigh[i] = clampJ(gJHigh[gi]);
+        }
+        for (int j = 0; j <= cfg.numCellsY; ++j) {
+            const int gj = cfg.originY + j;
+            s.iLow [j] = clampI(gILow [gj]);
+            s.iHigh[j] = clampI(gIHigh[gj]);
+        }
     }
 
     // ── Initial velocity field ───────────────────────────────────────────────

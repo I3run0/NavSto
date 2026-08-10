@@ -12,7 +12,7 @@ Usage:
     python3 scripts/benchmark.py                    # default size matrix
     python3 scripts/benchmark.py --sizes small,medium
     python3 scripts/benchmark.py --repeats 5 --steps 100
-    python3 scripts/benchmark.py --skip-build        # reuse existing ./navsolver
+    python3 scripts/benchmark.py --skip-build        # reuse the built binary
 
     # OpenMP strong-scaling sweep:
     python3 scripts/benchmark.py --binary navsolver_omp --threads 1,2,4,6,12
@@ -33,7 +33,11 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NAVSOLVER = REPO_ROOT / "navsolver"
+
+# Same convention as scripts/validate.py: the CMake build tree by default,
+# overridable so `cmake --build build --target bench` can point here.
+BIN_DIR = Path(os.environ.get("NAVSOLVER_BIN_DIR", REPO_ROOT / "build"))
+NAVSOLVER = BIN_DIR / "navsolver"
 
 # Grid sizes only — geometry is fixed to AbruptExpansion (indices derived
 # purely from grid size, no baseUnit to misconfigure) so this harness
@@ -49,12 +53,13 @@ ACTIVE_CELLS_RE = re.compile(r"Active cells:\s*(\d+)")
 STEPS_RE = re.compile(r"Total steps\s*:\s*(\d+)")
 
 
-def build(make_target="all"):
-    print(f"Building (make {make_target})...", file=sys.stderr)
-    subprocess.run(["make", "clean"], cwd=REPO_ROOT, check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["make", make_target], cwd=REPO_ROOT, check=True,
+def build(target="navsolver"):
+    print(f"Building {target} (Release)...", file=sys.stderr)
+    subprocess.run(["cmake", "-S", str(REPO_ROOT), "-B", str(BIN_DIR),
+                     "-DCMAKE_BUILD_TYPE=Release"], check=True,
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    subprocess.run(["cmake", "--build", str(BIN_DIR), "--target", target, "-j"],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
 def make_config(nx, ny, nz, steps, num_pressure_iter, out_dir):
@@ -117,7 +122,7 @@ def main():
     ap.add_argument("--num-pressure-iter", type=int, default=5)
     ap.add_argument("--skip-build", action="store_true", help="reuse existing binary")
     ap.add_argument("--binary", default="navsolver",
-                     help="binary name under the repo root to run (default: navsolver; "
+                     help="binary name under the build tree to run (default: navsolver; "
                           "use navsolver_omp for an OpenMP strong-scaling sweep)")
     ap.add_argument("--threads", default=None,
                      help="comma-separated OMP_NUM_THREADS values to sweep (default: none -- "
@@ -132,12 +137,11 @@ def main():
         if s not in SIZE_MATRIX:
             ap.error(f"unknown size '{s}', choose from {list(SIZE_MATRIX)}")
 
-    binary_path = REPO_ROOT / args.binary
+    binary_path = BIN_DIR / args.binary
     threads_list = [int(t) for t in args.threads.split(",")] if args.threads else [None]
 
     if not args.skip_build:
-        make_target = "openmp" if args.binary == "navsolver_omp" else "all"
-        build(make_target)
+        build(args.binary)
     elif not binary_path.exists():
         ap.error(f"{binary_path} not found; run without --skip-build first")
 

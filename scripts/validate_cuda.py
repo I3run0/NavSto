@@ -35,7 +35,7 @@ MX570's 4 GiB (see docs/cuda-port.md for the actual measured figure).
 Usage:
     python3 scripts/validate_cuda.py
     python3 scripts/validate_cuda.py --skip-build
-    make validate-cuda
+    cmake --build build --target validate_cuda
 """
 
 import argparse
@@ -45,8 +45,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from validate import (REPO_ROOT, BIN_DIR, NAVSOLVER, parse_vtk_scalar,  # noqa: E402
-                       REDBLACK_CFG_TEMPLATE, REDBLACK_TOL)
+from validate import (REPO_ROOT, BIN_DIR, NAVSOLVER, NAVSOLVER_OMP,  # noqa: E402
+                       parse_vtk_scalar, REDBLACK_CFG_TEMPLATE, REDBLACK_TOL)
 from validate_parallel import compare_velocity_fields  # noqa: E402
 
 NAVSOLVER_CUDA = BIN_DIR / "navsolver_cuda"
@@ -81,6 +81,10 @@ def build():
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     subprocess.run(["cmake", "--build", str(build_dir), "--target", "navsolver", "-j"],
                     check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # navsolver_omp is the reference for check_rk4_equivalence; not fatal if
+    # this machine has no OpenMP, that check skips itself.
+    subprocess.run(["cmake", "--build", str(build_dir), "--target", "navsolver_omp", "-j"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     result = subprocess.run(["cmake", "--build", str(build_dir), "--target", "navsolver_cuda", "-j"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if result.returncode == 0:
@@ -88,6 +92,7 @@ def build():
         # No-op when NAVSOLVER_BIN_DIR already points at build_dir (the
         # ctest path) -- shutil.copy would raise SameFileError there.
         for built, dest in ((build_dir / "navsolver_cuda", NAVSOLVER_CUDA),
+                            (build_dir / "navsolver_omp", NAVSOLVER_OMP),
                             (build_dir / "navsolver", NAVSOLVER)):
             if built.exists() and built.resolve() != dest.resolve():
                 shutil.copy(built, dest)
@@ -138,6 +143,65 @@ def check_redblack_equivalence():
             return False
         print(f"  PASS: gauge-fixed pressure fields agree (L2_rel={l2_rel:.3e})")
         return True
+
+
+RK4_TOL = 1e-12
+
+RK4_CFG_TEMPLATE = """\
+numCellsX = 24
+numCellsY = 12
+numCellsZ = 6
+reynoldsNumber = 100.0
+hyperViscousStart = 0
+geometryShape = AbruptExpansion
+lateralBC = {lateral}
+outletBC = ZeroFirstDeriv
+initialProfile = InletProfile
+flowType = RK4Transient
+maxTimeSteps = 10
+convergenceTol = 0
+numPressureIter = 5
+reportEveryN = 10
+outputDir = {out}
+runName = cuda_rk4
+"""
+
+
+def check_rk4_equivalence():
+    """navsolver_omp vs navsolver_cuda on the RK4 path, bit-for-bit.
+
+    Compares against OpenMP rather than serial because both run the same
+    red-black SOR, leaving nothing that should legitimately differ -- so the
+    tolerance can be 1e-12 instead of the 1e-2 the gauge-fixed serial
+    comparison needs. That matters: the missing post-combine BC pass this
+    check was written for showed up as a ~1e-3 drift, which any tolerance
+    loose enough for a GS-vs-red-black comparison would have passed.
+
+    Both lateral BCs are covered because the outlet and periodic velocity
+    copies are separate branches of rk4ApplyFinalBCs.
+    """
+    print("\n== RK4 equivalence: navsolver_omp vs navsolver_cuda ==")
+    if not NAVSOLVER_OMP.exists():
+        print("  SKIP: navsolver_omp not built (no OpenMP?)")
+        return True
+
+    ok = True
+    for lateral in ("SolidWall", "Periodic"):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "rk4.cfg"
+
+            out_omp = Path(tmp) / "omp"
+            cfg_path.write_text(RK4_CFG_TEMPLATE.format(out=out_omp, lateral=lateral))
+            run(NAVSOLVER_OMP, cfg_path)
+
+            out_cuda = Path(tmp) / "cuda"
+            cfg_path.write_text(RK4_CFG_TEMPLATE.format(out=out_cuda, lateral=lateral))
+            run(NAVSOLVER_CUDA, cfg_path)
+
+            ok = compare_velocity_fields(out_omp / "cuda_rk4_t000010.vtk",
+                                          out_cuda / "cuda_rk4_t000010.vtk",
+                                          RK4_TOL, f"lateralBC={lateral}") and ok
+    return ok
 
 
 def check_determinism(repeats=5):
@@ -226,6 +290,7 @@ def main():
         sys.exit(0)
 
     ok = check_redblack_equivalence()
+    ok = check_rk4_equivalence() and ok
     ok = check_determinism() and ok
     ok = check_determinism_multiblock() and ok
 

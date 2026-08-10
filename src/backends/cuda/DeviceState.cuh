@@ -88,6 +88,11 @@ struct DeviceState {
     double *ppiuZ = nullptr, *ppidZ = nullptr, *qsiuZ = nullptr;
     double *KuZ = nullptr, *KvZ = nullptr, *KwZ = nullptr;
 
+    // ── RK4 bookkeeping buffers. Allocated by backendStartup() and only for
+    //  cfg.flowType == RK4Transient; null on every steady-marching run. ────
+    double *rk4VelX0 = nullptr, *rk4VelY0 = nullptr, *rk4VelZ0 = nullptr;
+    double *rk4Ku = nullptr, *rk4Kv = nullptr, *rk4Kw = nullptr;
+
     // ── Generic reusable reduction scratch (updateVelocities' maxChange,
     //  adaptTimeStep's per-component max) — sized to the largest per-cell
     //  upper-bound domain used anywhere (numCellsXm1*(numCellsY+1)*numCellsZ),

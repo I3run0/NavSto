@@ -53,6 +53,10 @@ public:
         if (!f)
             throw std::runtime_error("VtkExporter: cannot open " + fname.str());
 
+        // Local extents: this file describes the block of cells this process
+        // actually holds. A decomposed run writes one such block per rank, and
+        // ORIGIN below places each in the global domain -- their union is the
+        // full field, which is VTK's standard piece model.
         const int NX = s.cfg.numCellsX + 1;
         const int NY = s.cfg.numCellsY + 1;
         const int NZ = s.cfg.numCellsZ + 1;
@@ -66,7 +70,16 @@ public:
         // ── Grid definition ────────────────────────────────────────────────────
         f << "DATASET STRUCTURED_POINTS\n";
         f << "DIMENSIONS " << NX << " " << NY << " " << NZ << "\n";
-        f << "ORIGIN 0 0 0\n";
+        // Default float formatting, not the fixed/precision(6) the header line
+        // above leaves on the stream: an undecomposed run must still write the
+        // literal "ORIGIN 0 0 0" it always has.
+        const auto savedFlags = f.flags();
+        f.unsetf(std::ios_base::floatfield);
+        f << "ORIGIN "
+          << s.cfg.originX * s.cfg.cellSizeX << " "
+          << s.cfg.originY * s.cfg.cellSizeY << " "
+          << s.cfg.originZ * s.cfg.cellSizeZ << "\n";
+        f.flags(savedFlags);
         f << "SPACING "
           << s.cfg.cellSizeX << " " << s.cfg.cellSizeY << " " << s.cfg.cellSizeZ << "\n";
 

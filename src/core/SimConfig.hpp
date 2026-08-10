@@ -28,11 +28,31 @@ enum class FlowType       { SteadyMarching, RK4Transient };
 //  These are filled from a config file or hard-coded defaults before INIT().
 // ---------------------------------------------------------------------------
 struct SimConfig {
-    // Grid
+    // Grid — THIS RANK'S cells. Allocation and every loop bound come from
+    // these, so a decomposed backend sets them to its own slab.
     int numCellsX  = 120;   // II = 6*NN, NN=40
     int numCellsY  = 40;    // JJ = 2*NN
     int numCellsZ  = 20;    // KK = NN
     int baseUnit   = 20;    // NN
+
+    // The full domain, and this rank's offset into it. Geometry is defined in
+    // global coordinates (Setup.cpp) and VTK reports global extents, so those
+    // two read these rather than the local sizes above.
+    //
+    // A single-process backend leaves them alone: normalizeDecomposition()
+    // sets global = local and origin = 0, which makes every use below
+    // arithmetically identical to reading the local size directly.
+    int globalNumCellsX = 0, globalNumCellsY = 0, globalNumCellsZ = 0;
+    int originX = 0, originY = 0, originZ = 0;
+
+    /// Fills the global/origin fields for the undecomposed case. Called by
+    /// initSimulation() before geometry is built; idempotent, and a backend
+    /// that has already set them keeps its values.
+    void normalizeDecomposition() {
+        if (globalNumCellsX == 0) globalNumCellsX = numCellsX;
+        if (globalNumCellsY == 0) globalNumCellsY = numCellsY;
+        if (globalNumCellsZ == 0) globalNumCellsZ = numCellsZ;
+    }
 
     // Physical domain dimensions (Cmp x Alt x Lrg in original)
     double domainLengthX = 6.0;   // Cmp

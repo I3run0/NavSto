@@ -20,7 +20,10 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(nproc)"
 
-      - name: Unit tests
+      # Covers the unit suites and the solver-level validation scripts
+      # (physics correctness, OpenMP thread-count equivalence); both are
+      # registered as ctest tests in CMakeLists.txt.
+      - name: Tests
         run: ctest --test-dir build --output-on-failure
 
       - name: Smoke test
@@ -29,19 +32,8 @@ jobs:
             > /tmp/navsolver_check.cfg
           ./build/navsolver /tmp/navsolver_check.cfg
 
-  makefile-build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: make check
-        run: make check
-      - name: make test
-        run: make test
-      - name: make openmp
-        run: make openmp
-      - name: benchmark harness smoke check
+      # The one check ctest does not cover: benchmark.py reports timings
+      # rather than passing or failing, so it is a target, not a test.
+      - name: Benchmark harness smoke check
+        if: matrix.build_type == 'Release'
         run: python3 scripts/benchmark.py --sizes tiny --steps 10 --repeats 1 --skip-build
-      - name: physics correctness checks
-        run: python3 scripts/validate.py --skip-build
-      - name: OpenMP thread-count equivalence + determinism checks
-        run: python3 scripts/validate_parallel.py --skip-build

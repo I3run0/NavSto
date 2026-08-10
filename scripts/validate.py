@@ -22,8 +22,8 @@ Two tiers:
    arbitrary starting point; that needs a grid-convergence study, which is
    future work (see README).
 
-3. Red-black equivalence (only if navsolver_omp exists, built via
-   `make openmp`): src/backends/openmp/Physics.cpp's solvePressurePoisson uses
+3. Red-black equivalence (only if navsolver_omp exists, i.e. the
+   navsolver_omp target built): src/backends/openmp/Physics.cpp's solvePressurePoisson uses
    red-black SOR instead of the serial solver's sequential Gauss-Seidel/SOR
    (needed for OpenMP parallel-safety, see docs/openmp-parallelization.md).
    They converge to the SAME fixed point via a DIFFERENT iteration path,
@@ -40,7 +40,7 @@ Two tiers:
 Usage:
     python3 scripts/validate.py                # both tiers
     python3 scripts/validate.py --skip-build
-    make validate
+    cmake --build build --target validate_physics
 """
 
 import argparse
@@ -54,17 +54,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Where to look for the solver binaries. Defaults to the repo root (where
-# `make` drops them), overridable via NAVSOLVER_BIN_DIR so a CMake build
-# tree can be checked without copying binaries around -- that's how these
-# scripts are registered as ctest tests (see CMakeLists.txt).
+# Where to look for the solver binaries. Defaults to the standard CMake build
+# tree, overridable via NAVSOLVER_BIN_DIR so an out-of-tree build can be
+# checked without copying binaries around -- that's how these scripts are
+# registered as ctest tests (see CMakeLists.txt).
 #
 # Deliberately an env var rather than a CLI flag: validate_parallel.py and
 # validate_cuda.py do `from validate import NAVSOLVER, ...`, which binds
 # their own module-level names at import time. A flag parsed in main()
 # could not rebind those; an env var read here, before those imports
 # resolve, propagates to every caller.
-BIN_DIR = Path(os.environ.get("NAVSOLVER_BIN_DIR", REPO_ROOT))
+BIN_DIR = Path(os.environ.get("NAVSOLVER_BIN_DIR", REPO_ROOT / "build"))
 NAVSOLVER = BIN_DIR / "navsolver"
 NAVSOLVER_OMP = BIN_DIR / "navsolver_omp"
 
@@ -207,12 +207,26 @@ def parse_vtk_scalar(path, field_name):
     return dims, vals, at
 
 
+def configure():
+    """Configure the Release build tree BIN_DIR points at. Idempotent."""
+    subprocess.run(["cmake", "-S", str(REPO_ROOT), "-B", str(BIN_DIR),
+                     "-DCMAKE_BUILD_TYPE=Release"], check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def build_target(target):
+    """Best-effort build of one target; returns True if it succeeded. Callers
+    decide whether a failure is fatal or just skips a tier."""
+    return subprocess.run(["cmake", "--build", str(BIN_DIR), "--target", target, "-j"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           text=True).returncode == 0
+
+
 def build():
     print("Building (Release)...", file=sys.stderr)
-    subprocess.run(["make", "clean"], cwd=REPO_ROOT, check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["make", "all"], cwd=REPO_ROOT, check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    configure()
+    if not build_target("navsolver"):
+        raise RuntimeError("navsolver build failed")
 
 
 def build_openmp():
@@ -220,11 +234,8 @@ def build_openmp():
     toolchain isn't available (e.g. no OpenMP) -- tier 3 is skipped, not
     failed, in that case."""
     print("Building (OpenMP)...", file=sys.stderr)
-    result = subprocess.run(["make", "openmp"], cwd=REPO_ROOT,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    if result.returncode != 0:
-        print(f"  (skipping tier 3: make openmp failed: {result.stderr.strip()[-300:]})",
-              file=sys.stderr)
+    if not build_target("navsolver_omp"):
+        print("  (skipping tier 3: navsolver_omp build failed)", file=sys.stderr)
         return False
     return NAVSOLVER_OMP.exists()
 

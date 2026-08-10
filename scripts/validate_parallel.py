@@ -32,7 +32,7 @@ navsolver_omp against ITSELF, never against the separate serial binary:
 Usage:
     python3 scripts/validate_parallel.py
     python3 scripts/validate_parallel.py --threads 1,2,4,8 --skip-build
-    make validate-parallel
+    cmake --build build --target validate_parallel
 """
 
 import argparse

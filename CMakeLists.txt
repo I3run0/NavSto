@@ -67,13 +67,27 @@ add_custom_target(run
     DEPENDS navsolver
 )
 
-# Make check target
+# Smoke test: 10 steps on a tiny grid, just to prove the binary runs.
+# The config is written at configure time -- inlining it as a shell printf
+# inside add_custom_target puts raw newlines into the generated makefile.
+set(SMOKE_CFG ${CMAKE_CURRENT_BINARY_DIR}/navsolver_check.cfg)
+file(WRITE ${SMOKE_CFG}
+"numCellsX = 12
+numCellsY = 8
+numCellsZ = 8
+geometryShape = AbruptExpansion
+maxTimeSteps = 10
+reportEveryN = 5
+outputDir = ${CMAKE_CURRENT_BINARY_DIR}/smoke
+")
+
 add_custom_target(check
     COMMAND ${CMAKE_COMMAND} -E echo "Running smoke test..."
-    COMMAND sh -c "printf 'numCellsX = 12\nnumCellsY = 8\nnumCellsZ = 8\ngeometryShape = AbruptExpansion\nmaxTimeSteps = 10\nreportEveryN = 5\n' > /tmp/navsolver_check.cfg"
-    COMMAND ./navsolver /tmp/navsolver_check.cfg
+    COMMAND $<TARGET_FILE:navsolver> ${SMOKE_CFG}
+    COMMAND ${CMAKE_COMMAND} -E echo "Smoke test passed."
     DEPENDS navsolver
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    USES_TERMINAL
 )
 
 # ── OpenMP variant (additive: configure still succeeds without OpenMP) ────────
@@ -97,11 +111,10 @@ else()
     message(STATUS "OpenMP not found — skipping navsolver_omp target")
 endif()
 
-# ── CUDA variant (additive, CMake-only per docs/cuda-port.md — configure
-#    still succeeds without a CUDA toolchain). Deliberately asymmetric with
-#    the OpenMP target above: CUDA needs enable_language(CUDA) + mixed
-#    C++/CUDA linking, which CMake handles natively; the hand-rolled
-#    Makefile would have to reimplement that, so CUDA is CMake-only. ────────
+# ── CUDA variant (additive — configure still succeeds without a CUDA
+#    toolchain). Needs enable_language(CUDA) + mixed C++/CUDA linking, which
+#    CMake handles natively; having to reimplement that by hand is what
+#    retired the parallel Makefile build. ─────────────────────────────────
 include(CheckLanguage)
 check_language(CUDA)
 
@@ -190,13 +203,12 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 # ── Solver-level validation scripts ──────────────────────────────────────────
-# These were previously reachable only through the Makefile CI job. Registering
-# them here means the CMake job covers them too, and -- since they're the only
-# checks that exercise a whole built binary end-to-end (VTK field comparisons,
-# thread-count equivalence, GPU determinism) -- they're the real safety net for
-# the src/ restructuring. NAVSOLVER_BIN_DIR points them at this build tree
-# instead of the repo root; --skip-build stops them rebuilding what ctest
-# already built.
+# The only checks that exercise a whole built binary end-to-end (VTK field
+# comparisons, thread-count equivalence, GPU determinism), so they are the real
+# safety net for backend changes. Registered both as ctest tests and as named
+# targets, since running one on its own is the common case while iterating.
+# NAVSOLVER_BIN_DIR points them at this build tree; --skip-build stops them
+# rebuilding what has already been built.
 find_package(Python3 COMPONENTS Interpreter)
 
 if(Python3_Interpreter_FOUND)
@@ -209,6 +221,14 @@ if(Python3_Interpreter_FOUND)
             ENVIRONMENT "NAVSOLVER_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}"
             TIMEOUT 900
         )
+
+        add_custom_target(${name}
+            COMMAND ${CMAKE_COMMAND} -E env
+                    NAVSOLVER_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                    ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/${script} --skip-build
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            USES_TERMINAL)
     endfunction()
 
     add_validation_test(validate_physics  validate.py)
@@ -220,6 +240,15 @@ if(Python3_Interpreter_FOUND)
     if(CMAKE_CUDA_COMPILER)
         add_validation_test(validate_cuda validate_cuda.py)
     endif()
+
+    # Timing harness — not a test (no pass/fail), so target only.
+    add_custom_target(bench
+        COMMAND ${CMAKE_COMMAND} -E env
+                NAVSOLVER_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/benchmark.py --skip-build
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        USES_TERMINAL)
 else()
     message(STATUS "Python3 interpreter not found — skipping validation-script tests")
 endif()
