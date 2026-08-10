@@ -47,7 +47,12 @@ OMPOBJS := $(patsubst $(OMPSRCDIR)/%.cpp, $(OMPBUILDDIR)/%.o, $(OMPSRCS))
 # Backend-independent sources (geometry + initial conditions — src/common/Setup.cpp).
 # Compiled once per build profile: the serial and OpenMP variants use different
 # flags (-fopenmp), so each gets its own object under its own build dir.
-COMMON_SRCS    := $(wildcard $(INCDIR)/*.cpp)
+# Listed explicitly, not globbed: Driver.cpp defines main(), so the test
+# binaries (which have their own) must link CORE_SRCS without it.
+CORE_SRCS   := $(INCDIR)/Setup.cpp
+DRIVER_SRC  := $(INCDIR)/Driver.cpp
+COMMON_SRCS := $(CORE_SRCS) $(DRIVER_SRC)
+
 COMMON_OBJS    := $(patsubst $(INCDIR)/%.cpp, $(BUILDDIR)/common_%.o, $(COMMON_SRCS))
 OMPCOMMON_OBJS := $(patsubst $(INCDIR)/%.cpp, $(OMPBUILDDIR)/common_%.o, $(COMMON_SRCS))
 
@@ -58,8 +63,9 @@ TEST_OBJS := $(patsubst $(TESTDIR)/%.cpp, $(TESTBUILDDIR)/%.o, $(TEST_SRCS))
 # has its own main()) so PhysicsTests.cpp can exercise them in isolation.
 TEST_PHYSICS_OBJ := $(TESTBUILDDIR)/serial_Physics.o
 
-# Setup.cpp (geometry/ICs) — the tests call initSimulation() directly.
-TEST_COMMON_OBJS := $(patsubst $(INCDIR)/%.cpp, $(TESTBUILDDIR)/common_%.o, $(COMMON_SRCS))
+# Setup.cpp only (geometry/ICs) — the tests call initSimulation() directly,
+# and must NOT link Driver.cpp, which defines its own main().
+TEST_COMMON_OBJS := $(patsubst $(INCDIR)/%.cpp, $(TESTBUILDDIR)/common_%.o, $(CORE_SRCS))
 
 # ── Build profiles ─────────────────────────────────────────────────────────────
 RELEASE_FLAGS  := -O3 -DNDEBUG -march=native -funroll-loops

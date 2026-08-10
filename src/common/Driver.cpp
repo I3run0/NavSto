@@ -1,5 +1,20 @@
 // =============================================================================
-//  main.cpp  —  NavSolver entry point.
+//  Driver.cpp  —  NavSolver entry point and time-marching loops.
+//
+//  Shared by every CPU backend. Was two byte-identical 264-line copies at
+//  src/serial/main.cpp and src/openmp/main.cpp; compiled once per target now,
+//  so each still gets its own SimState and its own flags.
+//
+//  Sharing it is a benchmark-validity property, not a tidiness one: this file
+//  decides WHAT WORK GETS DONE -- the operator sequence, the RK4 stage
+//  weights, the convergence test, how often diagnostics and snapshots run. If
+//  two backends disagreed on any of that, their timings would not be
+//  measuring the same computation. The kernels those calls dispatch to are
+//  what differ, and they are selected at link time (see Physics.hpp).
+//
+//  A backend whose loop genuinely differs opts out rather than branching here
+//  -- src/cuda/main.cu does exactly that, keeping fields device-resident for
+//  the whole per-step loop instead of round-tripping through the host.
 //
 //  Usage:
 //    ./navsolver [config.cfg]
