@@ -18,6 +18,7 @@
 #include "VtkExporter.hpp"
 #include "ConfigParser.hpp"
 #include "Logger.hpp"
+#include "CudaKernelTimer.cuh"
 #include "DeviceState.cuh"
 
 #include <iostream>
@@ -101,16 +102,16 @@ static void runSteady(SimState& s, DeviceState& d) {
     s.useHalfStep = false;
 
     do {
-        adaptTimeStepCuda(d, s.timeStepSize);
+        NAVSOLVER_TIME_CUDA(TimeStep, adaptTimeStepCuda(d, s.timeStepSize));
         ++s.timeStep;
         s.simulationTime += s.timeStepSize;
 
-        buildPressureSourceCuda(d, s.timeStepSize);
-        solvePressurePoissonCuda(d);
-        updateVelocitiesCuda(d, s.useHalfStep, s.timeStepSize);
-        computeAccelerationsCuda(d);
-        computeMomentumResidualCuda(d, s.momentumResidMax, s.momentumResidRMS);
-        computeDivergenceCuda(d, s.dilatationMax, s.intDivergence, s.intAbsDivergence);
+        NAVSOLVER_TIME_CUDA(PressSource, buildPressureSourceCuda(d, s.timeStepSize));
+        NAVSOLVER_TIME_CUDA(PressSolve, solvePressurePoissonCuda(d));
+        NAVSOLVER_TIME_CUDA(UpdateVel, updateVelocitiesCuda(d, s.useHalfStep, s.timeStepSize));
+        NAVSOLVER_TIME_CUDA(Accel, computeAccelerationsCuda(d));
+        NAVSOLVER_TIME_CUDA(Residual, computeMomentumResidualCuda(d, s.momentumResidMax, s.momentumResidRMS));
+        NAVSOLVER_TIME_CUDA(Divergence, computeDivergenceCuda(d, s.dilatationMax, s.intDivergence, s.intAbsDivergence));
 
         LOG_INFO("step=", std::setw(6), s.timeStep,
                  "  t=",  std::fixed, std::setprecision(5), s.simulationTime,
@@ -152,7 +153,7 @@ static void runRK4(SimState& s, DeviceState& d) {
     const long long activeTotal = (long long)d.numCellsXm1 * (d.numCellsY + 1) * d.numCellsZ;
 
     do {
-        adaptTimeStepCuda(d, s.timeStepSize);
+        NAVSOLVER_TIME_CUDA(TimeStep, adaptTimeStepCuda(d, s.timeStepSize));
         ++s.timeStep;
         s.simulationTime += s.timeStepSize;
 
@@ -162,13 +163,13 @@ static void runRK4(SimState& s, DeviceState& d) {
             rk4RestoreKernel<<<gridForFull(d.fieldLen), BLK>>>(d, velX0, velY0, velZ0);
             s.useHalfStep = (stage <= 2);
 
-            buildPressureSourceCuda(d, s.timeStepSize);
-            solvePressurePoissonCuda(d);
-            updateVelocitiesCuda(d, s.useHalfStep, s.timeStepSize);
+            NAVSOLVER_TIME_CUDA(PressSource, buildPressureSourceCuda(d, s.timeStepSize));
+            NAVSOLVER_TIME_CUDA(PressSolve, solvePressurePoissonCuda(d));
+            NAVSOLVER_TIME_CUDA(UpdateVel, updateVelocitiesCuda(d, s.useHalfStep, s.timeStepSize));
 
             rk4AccumulateKernel<<<gridForFull(activeTotal), BLK>>>(d, velX0, velY0, velZ0, Ku, Kv, Kw, rkWeights[stage - 1]);
 
-            computeAccelerationsCuda(d);
+            NAVSOLVER_TIME_CUDA(Accel, computeAccelerationsCuda(d));
         }
 
         rk4FinalCombineKernel<<<gridForFull(activeTotal), BLK>>>(d, velX0, velY0, velZ0, Ku, Kv, Kw);
@@ -178,9 +179,9 @@ static void runRK4(SimState& s, DeviceState& d) {
         // BC kernels via a zero-effect updateVelocitiesCuda-style call would
         // recompute velocities; instead call the BC kernels directly through
         // a dedicated pass identical to src/serial/main.cpp's runRK4 tail.
-        computeAccelerationsCuda(d);   // also applies periodic accel copy internally (zSweepKernel)
-        computeMomentumResidualCuda(d, s.momentumResidMax, s.momentumResidRMS);
-        computeDivergenceCuda(d, s.dilatationMax, s.intDivergence, s.intAbsDivergence);
+        NAVSOLVER_TIME_CUDA(Accel, computeAccelerationsCuda(d));  // also applies periodic accel copy internally (zSweepKernel)
+        NAVSOLVER_TIME_CUDA(Residual, computeMomentumResidualCuda(d, s.momentumResidMax, s.momentumResidRMS));
+        NAVSOLVER_TIME_CUDA(Divergence, computeDivergenceCuda(d, s.dilatationMax, s.intDivergence, s.intAbsDivergence));
 
         LOG_INFO("step=", std::setw(6), s.timeStep,
                  "  t=",  std::fixed, std::setprecision(5), s.simulationTime,
@@ -295,6 +296,21 @@ int main(int argc, char* argv[]) {
     LOG_INFO("  Total steps  : ", s.timeStep);
     LOG_INFO("  ResidMax     : ", s.momentumResidMax);
     LOG_INFO("  DilMax       : ", s.dilatationMax);
+
+#if NAVSOLVER_PROFILE_ENABLED
+    // Profiling build only. Note the GPU caveat in CudaKernelTimer.cuh: the
+    // per-kernel timer synchronizes, so these SHARES are meaningful but the
+    // total is not comparable to an uninstrumented run.
+    {
+        const auto csv = s.cfg.outputDir / (s.cfg.runName + "_kernels.csv");
+        KernelProfile::instance().writeCsv(csv);
+
+        std::ostringstream table;
+        KernelProfile::instance().report(table);
+        LOG_INFO(table.str());
+        LOG_INFO("  Per-kernel   → ", csv.string());
+    }
+#endif
 
     freeDeviceState(d);
     return 0;
