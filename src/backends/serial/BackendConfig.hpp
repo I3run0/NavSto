@@ -6,14 +6,17 @@
 //  with its own backend directory on the include path, so SimState is a
 //  different type per binary. Edit this file to retune this backend's memory;
 //  no other backend reads it.
-//
-//  Never link objects built against two different backend configs.
 // =============================================================================
 
 #include "AccelScratch.hpp"
 #include "GridField.hpp"
 #include "KernelTimers.hpp"
 #include "Rk4Workspace.hpp"
+
+/// Namespace SimState (and so every operator taking it) lands in, which is what
+/// makes linking against another backend's objects a link error instead of a
+/// silent layout mismatch. See SimState.hpp.
+#define NAVSOLVER_BACKEND_NS backend_serial
 
 /// Shown in the startup banner; see backendName().
 inline constexpr const char* kBackendName = "serial";

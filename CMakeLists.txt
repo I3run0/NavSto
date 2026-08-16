@@ -34,7 +34,7 @@ set(SHARED_INC ${COREDIR} ${SOLVERDIR} ${IODIR})
 set(SRCDIR  ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/serial)
 set(HOSTDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/host)
 
-file(GLOB SRCS "${SRCDIR}/*.cpp")
+file(GLOB SRCS CONFIGURE_DEPENDS "${SRCDIR}/*.cpp")
 
 # Backend-independent sources, split by what they supply.
 #   CORE_SRCS   geometry + initial conditions — linked by EVERY target,
@@ -100,7 +100,7 @@ find_package(OpenMP)
 
 if(OpenMP_CXX_FOUND)
     set(OMPSRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/openmp)
-    file(GLOB OMPSRCS "${OMPSRCDIR}/*.cpp")
+    file(GLOB OMPSRCS CONFIGURE_DEPENDS "${OMPSRCDIR}/*.cpp")
 
     add_executable(navsolver_omp ${OMPSRCS} ${CORE_SRCS} ${HOST_SRC} ${DRIVER_SRC})
 
@@ -124,7 +124,7 @@ if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
 
     set(CUDASRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cuda)
-    file(GLOB CUDASRCS "${CUDASRCDIR}/*.cu")
+    file(GLOB CUDASRCS CONFIGURE_DEPENDS "${CUDASRCDIR}/*.cu")
 
     # Shares the driver: cuda/BackendConfig.hpp keeps DeviceState opaque, so
     # Driver.cpp still compiles as plain C++ here. CudaBackend.cu supplies the
@@ -133,11 +133,15 @@ if(CMAKE_CUDA_COMPILER)
 
     target_include_directories(navsolver_cuda PRIVATE ${SHARED_INC} ${CUDASRCDIR})
 
-    # sm_86: this machine's GPU specifically (NVIDIA GeForce MX570 A,
-    # Compute Capability 8.6) -- deliberately narrow, not a generic
-    # multi-arch build. See docs/cuda-port.md.
+    # Defaults to sm_86, this machine's GPU (NVIDIA GeForce MX570 A, Compute
+    # Capability 8.6) -- deliberately one arch, not a generic multi-arch build.
+    # Override on another machine with -DNAVSOLVER_CUDA_ARCH=<cc>, e.g. 75.
+    # See docs/cuda-port.md.
+    set(NAVSOLVER_CUDA_ARCH 86 CACHE STRING
+        "CUDA compute capability to build navsolver_cuda for (e.g. 86, 75)")
+
     set_target_properties(navsolver_cuda PROPERTIES
-        CUDA_ARCHITECTURES 86
+        CUDA_ARCHITECTURES ${NAVSOLVER_CUDA_ARCH}
         CUDA_STANDARD 20
         CUDA_STANDARD_REQUIRED ON
     )
@@ -149,7 +153,8 @@ if(CMAKE_CUDA_COMPILER)
         $<$<COMPILE_LANGUAGE:CUDA>:-O3 -DNDEBUG>
     )
 
-    message(STATUS "CUDA compiler found (${CMAKE_CUDA_COMPILER}) — building navsolver_cuda for sm_86")
+    message(STATUS "CUDA compiler found (${CMAKE_CUDA_COMPILER}) — building "
+                   "navsolver_cuda for sm_${NAVSOLVER_CUDA_ARCH}")
 else()
     message(STATUS "No CUDA compiler found — skipping navsolver_cuda target")
 endif()
@@ -157,7 +162,7 @@ endif()
 # ── Unit tests ───────────────────────────────────────────────────────────────
 enable_testing()
 
-file(GLOB_RECURSE TEST_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+file(GLOB_RECURSE TEST_SRCS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 
 add_executable(navsolver_tests ${TEST_SRCS} ${SRCDIR}/Physics.cpp ${CORE_SRCS})
 

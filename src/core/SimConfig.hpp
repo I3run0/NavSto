@@ -83,8 +83,10 @@ struct SimConfig {
     InitialProfile initialProfile   = InitialProfile::PotentialFlow;  // PerfilInicial = "LCP"
     FlowType       flowType         = FlowType::SteadyMarching;       // itp = 0
 
-    // Output
-    std::filesystem::path outputDir  = "results";
+    // Output. Defaults under experiments/results/, which .gitignore covers --
+    // a run's VTK snapshots are regenerable and large (hundreds of MB for a
+    // production grid), so the default path must not be one git will commit.
+    std::filesystem::path outputDir  = "experiments/results";
     std::string           runName    = "cam_re9600";
     int                   numPressureIter = 5;
 

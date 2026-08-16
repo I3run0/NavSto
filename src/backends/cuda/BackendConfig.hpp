@@ -11,6 +11,11 @@
 #include "GridField.hpp"
 #include "SimConfig.hpp"
 
+/// Namespace SimState (and so every operator taking it) lands in, which is what
+/// makes linking against another backend's objects a link error instead of a
+/// silent layout mismatch. See SimState.hpp.
+#define NAVSOLVER_BACKEND_NS backend_cuda
+
 /// Shown in the startup banner; see backendName().
 inline constexpr const char* kBackendName = "CUDA";
 

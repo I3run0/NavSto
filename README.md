@@ -112,8 +112,8 @@ end-to-end numbers from an uninstrumented build. See
   red-black pressure solve (needed since plain Gauss-Seidel/SOR can't be
   parallelized as-is), per-thread scratch buffers, a real data race found
   and fixed during verification, and real strong-scaling numbers (peak
-  ~1.2-1.3x at 2 threads, declining beyond — matches the roofline's
-  memory-bandwidth-saturation prediction).
+  ~1.9x at 6 threads on a 12-thread laptop; the remaining gap to linear is
+  memory-bandwidth saturation, as the roofline predicted).
   ```bash
   cmake --build build --target navsolver_omp            # navsolver_omp
   cmake --build build --target validate_parallel        # thread-count equivalence + determinism
@@ -186,22 +186,22 @@ Edit `config_re100_expansion.cfg`.  All keys and allowed values:
 | `maxTimeSteps` | `10000` | Maximum number of time steps |
 | `reportEveryN` | `500` | Write VTK snapshot every N steps |
 | `convergenceTol` | `1e-6` | Stop when `ResidMax < tol` |
-| `outputDir` | `results` | Directory for all outputs |
+| `outputDir` | `experiments/results` | Directory for all outputs (gitignored) |
 | `runName` | `navsolver_run` | Prefix for output filenames |
 
 ## Output Files (Industrial Standard)
 
 | File | Format | Description |
 |------|--------|-------------|
-| `results/<runName>_t000000.vtk` | **VTK Legacy ASCII** | t=0 snapshot |
-| `results/<runName>_t000500.vtk` | VTK Legacy ASCII | Snapshot at step 500 |
-| `results/<runName>_convergence.csv` | CSV | Per-step diagnostics |
-| `results/<runName>.cfg` | Config | Provenance snapshot |
+| `<outputDir>/<runName>_t000000.vtk` | **VTK Legacy ASCII** | t=0 snapshot |
+| `<outputDir>/<runName>_t000500.vtk` | VTK Legacy ASCII | Snapshot at step 500 |
+| `<outputDir>/<runName>_convergence.csv` | CSV | Per-step diagnostics |
+| `<outputDir>/<runName>.cfg` | Config | Provenance snapshot, replays the run |
 | `navsolver.log` | Plain text | Timestamped run log |
 
 ### Opening in ParaView
 
-1. `File → Open → results/<runName>_t*.vtk` (select the group)
+1. `File → Open → experiments/results/<runName>_t*.vtk` (select the group)
 2. Click **Apply**
 3. Select `Velocity` in the colouring dropdown for velocity magnitude
 4. Add `Filters → Glyph` for vector arrows
@@ -234,7 +234,8 @@ NavSolver/
 │
 ├── experiments/                # Self-contained experiments
 │   ├── configs/                # All .cfg files (Re=100, Re=500, scaling, etc.)
-│   ├── results/                # Output from C++ solvers (gitignored)
+│   ├── results/                # All solver output — VTK, CSV, benchmarks
+│   │                           # (gitignored; regenerable and large)
 │   └── notebooks/              # Jupyter for loading results, plotting, comparison
 │
 ├── tests/                      # Unit tests (header-only harness, no deps),

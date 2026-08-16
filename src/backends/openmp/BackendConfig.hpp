@@ -16,6 +16,12 @@
 #include <omp.h>
 #include <vector>
 
+/// Namespace SimState (and so every operator taking it) lands in, which is what
+/// makes linking against another backend's objects a link error instead of a
+/// silent layout mismatch — this backend's Extras is 24 bytes wider than
+/// serial's. See SimState.hpp.
+#define NAVSOLVER_BACKEND_NS backend_openmp
+
 /// Shown in the startup banner; see backendName().
 inline constexpr const char* kBackendName = "OpenMP";
 

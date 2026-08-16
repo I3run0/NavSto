@@ -4,10 +4,15 @@
 //
 //  `Field` (field storage) and `Extras` (backend-private working memory) come
 //  from the backend's own BackendConfig.hpp, resolved by include path — so
-//  SimState is deliberately a different type in each binary, and a backend can
-//  be retuned without touching a shared header.
+//  SimState is deliberately a different type, with a different layout, in each
+//  binary, and a backend can be retuned without touching a shared header.
 //
-//  Never link objects built against two different backend configs.
+//  The inline namespace below is what stops that from being dangerous. Every
+//  Physics.hpp/Backend.hpp operator takes SimState&, so putting SimState in a
+//  per-backend namespace gives each backend distinct mangled symbols: linking
+//  objects built against two different configs is now an undefined reference
+//  rather than a silent layout mismatch. `inline` keeps unqualified `SimState`
+//  working everywhere, so no call site has to name the namespace.
 // =============================================================================
 
 #include "BackendConfig.hpp"
@@ -18,6 +23,11 @@
 #include <fstream>
 #include <vector>
 
+#ifndef NAVSOLVER_BACKEND_NS
+#  error "BackendConfig.hpp must define NAVSOLVER_BACKEND_NS — see any backend's copy"
+#endif
+
+inline namespace NAVSOLVER_BACKEND_NS {
 
 // ---------------------------------------------------------------------------
 //  SimState  —  the full mutable state of a running simulation.
@@ -117,3 +127,5 @@ struct SimState {
         ext.allocate(cfg);
     }
 };
+
+}  // inline namespace NAVSOLVER_BACKEND_NS
