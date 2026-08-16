@@ -44,6 +44,12 @@ struct Options {
     // -- polynomial below 0.1, exp() up to 200, saturation above -- so
     // benchmarking at the wrong Re can measure a branch production never hits.
     double reynoldsNumber = 10000.0;
+    // Geometry decides the i-span of each j-row, and several optimisations are
+    // sensitive to span length (a peeled first iteration costs relatively more
+    // on a short row). production_can.cfg runs RoundedCorner, not the
+    // AbruptExpansion this used to hardcode.
+    std::string shape = "RoundedCorner";
+    int baseUnit = 40;
 };
 
 [[noreturn]] void usage(const char* argv0, int code) {
@@ -54,7 +60,10 @@ struct Options {
         "  --iters N       timed calls per kernel (default: 20)\n"
         "  --warmup N      untimed calls first (default: 3)\n"
         "  --pressure-iter N  numPressureIter (default: 5)\n"
-        "  --re R          Reynolds number (default: 10000, the production value)\n";
+        "  --re R          Reynolds number (default: 10000, the production value)\n"
+        "  --shape NAME    AbruptExpansion|AbruptContraction|SharpCorner|\n"
+        "                  RoundedCorner|Straight (default: RoundedCorner)\n"
+        "  --base-unit N   geometry base unit NN (default: 40)\n";
     std::exit(code);
 }
 
@@ -86,6 +95,8 @@ Options parseArgs(int argc, char* argv[]) {
         else if (a == "--warmup")        o.warmup = std::stoi(next("--warmup"));
         else if (a == "--pressure-iter") o.numPressureIter = std::stoi(next("--pressure-iter"));
         else if (a == "--re")            o.reynoldsNumber = std::stod(next("--re"));
+        else if (a == "--shape")         o.shape = next("--shape");
+        else if (a == "--base-unit")     o.baseUnit = std::stoi(next("--base-unit"));
         else if (a == "-h" || a == "--help") usage(argv[0], 0);
         else { std::cerr << "unknown argument: " << a << "\n"; usage(argv[0], 2); }
     }
@@ -154,9 +165,13 @@ void buildState(SimState& s, const Options& o) {
     s.cfg.numCellsY = o.numCellsY;
     s.cfg.numCellsZ = o.numCellsZ;
     s.cfg.numPressureIter = o.numPressureIter;
-    // Matches scripts/benchmark.py's make_config(), so kbench and the
-    // whole-program numbers describe the same workload.
-    s.cfg.geometryShape    = GeometryShape::AbruptExpansion;
+    s.cfg.baseUnit = o.baseUnit;
+    s.cfg.geometryShape =
+          o.shape == "AbruptExpansion"   ? GeometryShape::AbruptExpansion
+        : o.shape == "AbruptContraction" ? GeometryShape::AbruptContraction
+        : o.shape == "SharpCorner"       ? GeometryShape::SharpCorner
+        : o.shape == "Straight"          ? GeometryShape::Straight
+                                         : GeometryShape::RoundedCorner;
     s.cfg.lateralCondition = LateralBC::SolidWall;
     s.cfg.outletCondition  = OutletBC::ZeroFirstDeriv;
     s.cfg.initialProfile   = InitialProfile::InletProfile;
@@ -206,6 +221,7 @@ int main(int argc, char* argv[])
     std::cout << "  \"warmup\": " << o.warmup << ",\n";
     std::cout << "  \"numPressureIter\": " << o.numPressureIter << ",\n";
     std::cout << "  \"reynoldsNumber\": " << o.reynoldsNumber << ",\n";
+    std::cout << "  \"shape\": \"" << o.shape << "\",\n";
 
     long long activeCells = 0;
     std::vector<std::string> records;
