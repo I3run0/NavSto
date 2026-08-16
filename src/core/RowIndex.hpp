@@ -1,12 +1,9 @@
 #pragma once
 // =============================================================================
-//  RowIndex.hpp — one (i,j) active row.
+//  RowIndex.hpp — one (i,j) active row, spanning the full k range.
 //
-//  Separate from Geometry.hpp (which needs the whole SimState) so a
-//  BackendConfig.hpp can declare storage for rows without a circular include.
-//
-//  A row spans the full k range, so row + colour derives that colour's
-//  k-stride directly instead of materialising a per-cell list.
+//  Split out of Geometry.hpp (which needs all of SimState) so a
+//  BackendConfig.hpp can declare row storage without a circular include.
 // =============================================================================
 
 struct RowIndex { int i, j; };

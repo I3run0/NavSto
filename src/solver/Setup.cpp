@@ -209,78 +209,81 @@ void initSimulation(SimState& s)
     }
 
     switch (cfg.geometryShape) {
-    case GeometryShape::AbruptExpansion:
-        s.degreeIndexY = GY / 2;
+    case GeometryShape::AbruptExpansion: {
+        const int degreeIndexY = GY / 2;
         s.degreeIndex1 = GX / 12;
         s.degreeIndex2 = GX + 2;
-        for (int i = 0; i <= s.degreeIndex1; ++i)  { s.jLow[i] = s.degreeIndexY; s.jHigh[i] = GY; }
+        for (int i = 0; i <= s.degreeIndex1; ++i)  { s.jLow[i] = degreeIndexY; s.jHigh[i] = GY; }
         for (int i = s.degreeIndex1+1; i <= GX; ++i) { s.jLow[i] = 0; s.jHigh[i] = GY; }
-        for (int j = 0; j <= s.degreeIndexY; ++j)  s.iLow[j] = s.degreeIndex1;
-        for (int j = s.degreeIndexY+1; j <= GY; ++j) s.iLow[j] = 0;
+        for (int j = 0; j <= degreeIndexY; ++j)  s.iLow[j] = s.degreeIndex1;
+        for (int j = degreeIndexY+1; j <= GY; ++j) s.iLow[j] = 0;
         for (int j = 0; j <= GY; ++j)   s.iHigh[j] = GX;
         break;
+    }
 
-    case GeometryShape::AbruptContraction:
-        s.jLowInitial  = GY / 2;
-        s.jHighFinal   = GY;
-        s.degreeIndex1 = -1;
+    case GeometryShape::AbruptContraction: {
+        // degreeIndex1 = 0, not -1: it is the last i of buildInitialPressure's
+        // Hagen-Poiseuille ramp, and -1 made that function read press(-1,0,0).
+        // 0 expresses the same intent -- no ramp, flat at press(0,0,0) -- the
+        // way SharpCorner and RoundedCorner already do.
+        const int jLowInitial = GY / 2;
+        const int jHighFinal  = GY;
+        s.degreeIndex1 = 0;
         s.degreeIndex2 = 2 * cfg.baseUnit;
-        for (int i = 0; i < s.degreeIndex2;  ++i)  { s.jLow[i] = 0;              s.jHigh[i] = s.jHighFinal; }
-        for (int i = s.degreeIndex2; i <= GX; ++i) { s.jLow[i] = s.jLowInitial; s.jHigh[i] = s.jHighFinal; }
+        for (int i = 0; i < s.degreeIndex2;  ++i)  { s.jLow[i] = 0;           s.jHigh[i] = jHighFinal; }
+        for (int i = s.degreeIndex2; i <= GX; ++i) { s.jLow[i] = jLowInitial; s.jHigh[i] = jHighFinal; }
         for (int j = 0; j <= GY; ++j)   { s.iLow[j] = 0; s.iHigh[j] = GX; }
         break;
+    }
 
-    case GeometryShape::SharpCorner:
+    case GeometryShape::SharpCorner: {
+        const int degreeIndexY = GY - cfg.baseUnit;
         s.degreeIndex1 = 0;
         s.degreeIndex2 = cfg.baseUnit;
-        s.degreeIndexY = GY - cfg.baseUnit;
         for (int i = 0; i < s.degreeIndex2;  ++i)  { s.jLow[i] = 0; s.jHigh[i] = GY; }
-        for (int i = s.degreeIndex2; i <= GX; ++i) { s.jLow[i] = s.degreeIndexY; s.jHigh[i] = GY; }
+        for (int i = s.degreeIndex2; i <= GX; ++i) { s.jLow[i] = degreeIndexY; s.jHigh[i] = GY; }
         for (int j = 0; j <= GY; ++j)   s.iLow[j] = 0;
-        for (int j = 0; j <= s.degreeIndexY; ++j)  s.iHigh[j] = s.degreeIndex2;
-        for (int j = s.degreeIndexY+1; j <= GY; ++j) s.iHigh[j] = GX;
+        for (int j = 0; j <= degreeIndexY; ++j)  s.iHigh[j] = s.degreeIndex2;
+        for (int j = degreeIndexY+1; j <= GY; ++j) s.iHigh[j] = GX;
         break;
+    }
 
     case GeometryShape::RoundedCorner: {
+        const int degreeIndexY = GY - cfg.baseUnit;
         s.degreeIndex1 = 0;
         s.degreeIndex2 = cfg.baseUnit;
-        s.degreeIndexY = GY - cfg.baseUnit;
-        const int jRmp1loc = GY - 5*cfg.baseUnit/4;
-        s.rampIndexX1  = GY - jRmp1loc;
-        s.rampIndexY1  = jRmp1loc;
+        const int rampIndexY1 = GY - 5*cfg.baseUnit/4;
+        const int rampIndexX1 = GY - rampIndexY1;
         int jRmp2, iRmp2;
-        if (s.rampIndexY1 < GY - 6*cfg.baseUnit/10) {
-            jRmp2 = s.rampIndexY1 - 4*cfg.baseUnit/10;
-            iRmp2 = s.degreeIndex2 + s.degreeIndexY - jRmp2;
+        if (rampIndexY1 < GY - 6*cfg.baseUnit/10) {
+            jRmp2 = rampIndexY1 - 4*cfg.baseUnit/10;
+            iRmp2 = s.degreeIndex2 + degreeIndexY - jRmp2;
         } else { jRmp2 = -2; iRmp2 = GX + 2; }
-        s.rampIndexY2 = jRmp2;
-        s.rampIndexX2 = iRmp2;
         for (int i = 0; i < s.degreeIndex2; ++i) s.jLow[i] = 0;
         for (int i = s.degreeIndex2; i <= iRmp2; ++i) s.jLow[i] = jRmp2 + i - s.degreeIndex2;
-        for (int i = iRmp2; i <= GX; ++i) s.jLow[i] = s.degreeIndexY;
-        for (int i = 0; i <= s.rampIndexX1; ++i) s.jHigh[i] = s.rampIndexY1 + i;
-        for (int i = s.rampIndexX1+1; i <= GX; ++i) s.jHigh[i] = GY;
-        for (int j = 0; j <= s.rampIndexY1; ++j) s.iLow[j] = 0;
-        for (int j = s.rampIndexY1+1; j <= GY; ++j) s.iLow[j] = j - s.rampIndexY1;
+        for (int i = iRmp2; i <= GX; ++i) s.jLow[i] = degreeIndexY;
+        for (int i = 0; i <= rampIndexX1; ++i) s.jHigh[i] = rampIndexY1 + i;
+        for (int i = rampIndexX1+1; i <= GX; ++i) s.jHigh[i] = GY;
+        for (int j = 0; j <= rampIndexY1; ++j) s.iLow[j] = 0;
+        for (int j = rampIndexY1+1; j <= GY; ++j) s.iLow[j] = j - rampIndexY1;
         for (int j = 0; j <= jRmp2; ++j) s.iHigh[j] = s.degreeIndex2;
-        for (int j = jRmp2+1; j <= s.degreeIndexY; ++j) s.iHigh[j] = s.degreeIndex2 + j - jRmp2;
-        for (int j = s.degreeIndexY+1; j <= GY; ++j) s.iHigh[j] = GX;
+        for (int j = jRmp2+1; j <= degreeIndexY; ++j) s.iHigh[j] = s.degreeIndex2 + j - jRmp2;
+        for (int j = degreeIndexY+1; j <= GY; ++j) s.iHigh[j] = GX;
         break;
     }
 
     case GeometryShape::Straight:
-    default:
-        // Straight channel — full domain active at every x (no expansion,
-        // contraction, or corner). Used for analytical validation (plane
-        // Poiseuille flow has a closed-form solution only when the channel
-        // is straight end-to-end) and as the fallback for shapes not yet
-        // implemented (OpenCavity, GradualExpansion, etc).
+        // Full domain active at every x. Used for analytical validation —
+        // plane Poiseuille flow has a closed form only for a channel that is
+        // straight end to end.
         for (int i = 0; i <= GX; ++i) { s.jLow[i] = 0; s.jHigh[i] = GY; }
         for (int j = 0; j <= GY; ++j) { s.iLow[j] = 0; s.iHigh[j] = GX; }
         s.degreeIndex1 = GX + 1;
         s.degreeIndex2 = GX + 2;
         break;
     }
+    // No default: -Wswitch then flags a new GeometryShape that nobody built,
+    // instead of it silently running as a straight channel.
 
     // ── Slice this rank's window out of the global geometry ─────────────────
     // jLow/jHigh are indexed by i and hold j values; iLow/iHigh are indexed by

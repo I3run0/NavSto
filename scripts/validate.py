@@ -44,29 +44,15 @@ Usage:
 """
 
 import argparse
-import csv
-import os
 import re
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Where to look for the solver binaries. Defaults to the standard CMake build
-# tree, overridable via NAVSOLVER_BIN_DIR so an out-of-tree build can be
-# checked without copying binaries around -- that's how these scripts are
-# registered as ctest tests (see CMakeLists.txt).
-#
-# Deliberately an env var rather than a CLI flag: validate_parallel.py and
-# validate_cuda.py do `from validate import NAVSOLVER, ...`, which binds
-# their own module-level names at import time. A flag parsed in main()
-# could not rebind those; an env var read here, before those imports
-# resolve, propagates to every caller.
-BIN_DIR = Path(os.environ.get("NAVSOLVER_BIN_DIR", REPO_ROOT / "build"))
-NAVSOLVER = BIN_DIR / "navsolver"
-NAVSOLVER_OMP = BIN_DIR / "navsolver_omp"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from harness import (REPO_ROOT, NAVSOLVER, NAVSOLVER_OMP,  # noqa: E402
+                     build, compare_pressure_gauge_fixed, parse_convergence_csv,
+                     parse_vtk_velocity, run)
 
 # Blow-up detector: intentionally generous, just needs to catch crashes/NaN/divergence.
 CONSERVATION_CEILING = 1e6
@@ -150,96 +136,6 @@ runName = redblack_check
 REDBLACK_TOL = 1e-2  # relative L2, gauge-fixed (see module docstring tier 3)
 
 
-def run_solver(cfg_path):
-    result = subprocess.run([str(NAVSOLVER), str(cfg_path)],
-                             capture_output=True, text=True, cwd=REPO_ROOT)
-    if result.returncode != 0:
-        raise RuntimeError(f"navsolver exited {result.returncode}:\n{result.stderr}\n{result.stdout}")
-    return result.stdout
-
-
-def parse_convergence_csv(path):
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def parse_vtk_velocity(path):
-    lines = Path(path).read_text().splitlines()
-    dims = None
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith("DIMENSIONS"):
-            dims = tuple(int(x) for x in line.split()[1:])
-        if line.startswith("VECTORS Velocity"):
-            start = i + 1
-            break
-    if dims is None or start is None:
-        raise RuntimeError(f"could not parse {path}")
-    nx, ny, nz = dims
-    vel = [tuple(float(x) for x in line.split()) for line in lines[start:start + nx * ny * nz]]
-
-    def at(i, j, k):
-        return vel[(k * ny + j) * nx + i]
-
-    return dims, at
-
-
-def parse_vtk_scalar(path, field_name):
-    """Generic SCALARS reader (e.g. field_name='Pressure') -- values follow
-    the 'LOOKUP_TABLE default' line right after 'SCALARS <field_name> ...'."""
-    lines = Path(path).read_text().splitlines()
-    dims = None
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith("DIMENSIONS"):
-            dims = tuple(int(x) for x in line.split()[1:])
-        if line.startswith(f"SCALARS {field_name}"):
-            start = i + 2  # skip the SCALARS line and the LOOKUP_TABLE line
-            break
-    if dims is None or start is None:
-        raise RuntimeError(f"could not parse {field_name} from {path}")
-    nx, ny, nz = dims
-    vals = [float(line) for line in lines[start:start + nx * ny * nz]]
-
-    def at(i, j, k):
-        return vals[(k * ny + j) * nx + i]
-
-    return dims, vals, at
-
-
-def configure():
-    """Configure the Release build tree BIN_DIR points at. Idempotent."""
-    subprocess.run(["cmake", "-S", str(REPO_ROOT), "-B", str(BIN_DIR),
-                     "-DCMAKE_BUILD_TYPE=Release"], check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-
-def build_target(target):
-    """Best-effort build of one target; returns True if it succeeded. Callers
-    decide whether a failure is fatal or just skips a tier."""
-    return subprocess.run(["cmake", "--build", str(BIN_DIR), "--target", target, "-j"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                           text=True).returncode == 0
-
-
-def build():
-    print("Building (Release)...", file=sys.stderr)
-    configure()
-    if not build_target("navsolver"):
-        raise RuntimeError("navsolver build failed")
-
-
-def build_openmp():
-    """Best-effort: returns True if navsolver_omp was built, False if the
-    toolchain isn't available (e.g. no OpenMP) -- tier 3 is skipped, not
-    failed, in that case."""
-    print("Building (OpenMP)...", file=sys.stderr)
-    if not build_target("navsolver_omp"):
-        print("  (skipping tier 3: navsolver_omp build failed)", file=sys.stderr)
-        return False
-    return NAVSOLVER_OMP.exists()
-
-
 def check_conservation():
     print("== Conservation / stability sanity checks ==")
     ok = True
@@ -248,7 +144,7 @@ def check_conservation():
             out_dir = Path(tmp) / name
             cfg_path = Path(tmp) / f"{name}.cfg"
             cfg_path.write_text(template.format(out=out_dir))
-            run_solver(cfg_path)
+            run(NAVSOLVER, cfg_path)
 
             run_name = re.search(r"runName\s*=\s*(\S+)", template).group(1)
             csv_path = out_dir / f"{run_name}_convergence.csv"
@@ -284,7 +180,7 @@ def check_poiseuille():
         print(f"  FAIL: {POISEUILLE_CFG} not found")
         return False
 
-    run_solver(POISEUILLE_CFG)
+    run(NAVSOLVER, POISEUILLE_CFG)
 
     cfg_text = POISEUILLE_CFG.read_text()
     out_dir = REPO_ROOT / re.search(r"outputDir\s*=\s*(\S+)", cfg_text).group(1)
@@ -336,41 +232,14 @@ def check_redblack_equivalence():
     print("\n== Red-black equivalence: navsolver vs navsolver_omp (gauge-fixed) ==")
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = Path(tmp) / "redblack.cfg"
-
-        out_serial = Path(tmp) / "serial"
-        cfg_path.write_text(REDBLACK_CFG_TEMPLATE.format(out=out_serial))
-        subprocess.run([str(NAVSOLVER), str(cfg_path)], capture_output=True, text=True,
-                        cwd=REPO_ROOT, check=True)
-
-        out_omp = Path(tmp) / "omp"
-        cfg_path.write_text(REDBLACK_CFG_TEMPLATE.format(out=out_omp))
-        subprocess.run([str(NAVSOLVER_OMP), str(cfg_path)], capture_output=True, text=True,
-                        cwd=REPO_ROOT, check=True)
-
-        vtk_serial = out_serial / "redblack_check_t000001.vtk"
-        vtk_omp = out_omp / "redblack_check_t000001.vtk"
-        (nx, ny, nz), press_serial, _ = parse_vtk_scalar(vtk_serial, "Pressure")
-        (nx2, ny2, nz2), press_omp, _ = parse_vtk_scalar(vtk_omp, "Pressure")
-        if (nx, ny, nz) != (nx2, ny2, nz2):
-            print("  FAIL: grid size mismatch between serial and openmp output")
-            return False
-
-        mean_serial = sum(press_serial) / len(press_serial)
-        mean_omp = sum(press_omp) / len(press_omp)
-        diffs_sq = 0.0
-        serial_sq = 0.0
-        for ps, po in zip(press_serial, press_omp):
-            d = (ps - mean_serial) - (po - mean_omp)
-            diffs_sq += d * d
-            serial_sq += (ps - mean_serial) ** 2
-        l2_rel = (diffs_sq / max(serial_sq, 1e-30)) ** 0.5
-
-        if l2_rel > REDBLACK_TOL:
-            print(f"  FAIL: gauge-fixed pressure fields disagree "
-                  f"(L2_rel={l2_rel:.3e}, tol={REDBLACK_TOL:.0e})")
-            return False
-        print(f"  PASS: gauge-fixed pressure fields agree (L2_rel={l2_rel:.3e})")
-        return True
+        vtks = []
+        for label, binary in (("serial", NAVSOLVER), ("omp", NAVSOLVER_OMP)):
+            out_dir = Path(tmp) / label
+            cfg_path.write_text(REDBLACK_CFG_TEMPLATE.format(out=out_dir))
+            run(binary, cfg_path)
+            vtks.append(out_dir / "redblack_check_t000001.vtk")
+        return compare_pressure_gauge_fixed(vtks[0], vtks[1], REDBLACK_TOL,
+                                            "serial vs omp")
 
 
 def main():
@@ -380,17 +249,16 @@ def main():
     args = ap.parse_args()
 
     if not args.skip_build:
-        build()
+        build("navsolver", required=("navsolver",))
     elif not NAVSOLVER.exists():
         ap.error(f"{NAVSOLVER} not found; run without --skip-build first")
 
     ok = check_conservation()
     ok = check_poiseuille() and ok
 
-    if args.skip_build:
-        omp_available = NAVSOLVER_OMP.exists()
-    else:
-        omp_available = build_openmp()
+    if not args.skip_build:
+        build("navsolver_omp")
+    omp_available = NAVSOLVER_OMP.exists()
     if omp_available:
         ok = check_redblack_equivalence() and ok
     else:

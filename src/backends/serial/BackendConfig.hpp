@@ -30,7 +30,7 @@ struct Extras {
     AccelScratch accel;
 
     /// Allocated by backendStartup(), and only for RK4Transient runs.
-    Rk4WorkspaceT<Field> rk4;
+    Rk4Workspace rk4;
 
     /// Called by SimState::allocateFields(), before initSimulation().
     void allocate(const SimConfig& cfg) {

@@ -1,28 +1,11 @@
 #pragma once
 // =============================================================================
-//  VtkExporter.hpp  —  Writes simulation fields in VTK Legacy format.
+//  VtkExporter.hpp — VTK Legacy ASCII snapshots + a convergence-history CSV.
 //
-//  INDUSTRIAL STANDARD:  The VTK (Visualization Toolkit) format is the
-//  dominant standard for 3-D scientific / CFD data exchange.  Exported files
-//  can be opened directly in:
-//    • ParaView  (https://www.paraview.org)  — the de-facto CFD post-processor
-//    • VisIt     (https://visit-dav.github.io/visit-website)
-//    • Tecplot, EnSight, and any VTK-capable tool
-//
-//  FORMAT CHOICE:  We write VTK Legacy ASCII (.vtk) for maximum portability
-//  and human-readability.  For large grids, switch to VTK XML (.vts) which
-//  supports binary and compressed output — the interface is identical.
-//
-//  GRID TYPE:  Structured grid (STRUCTURED_POINTS / ImageData) matching the
-//  uniform Cartesian mesh used by the solver.
-//
-//  FIELDS EXPORTED PER SNAPSHOT:
-//    • velocity vector  (velX, velY, velZ) → VECTORS field "Velocity"
-//    • pressure scalar                     → SCALARS field "Pressure"
-//    • momentum residual magnitude         → SCALARS field "MomentumResidual"
-//    • velocity divergence                 → SCALARS field "Divergence"
-//
-//  NAMING CONVENTION:  {runName}_t{step:06d}.vtk
+//  STRUCTURED_POINTS matching the uniform Cartesian mesh, readable directly by
+//  ParaView/VisIt. Fields per snapshot: Velocity (vector), Pressure,
+//  MomentumResidual, VelocityMagnitude. Named {runName}_t{step:06d}.vtk.
+//  For large grids, switch to VTK XML (.vts) — binary, same interface.
 // =============================================================================
 
 #include "SimState.hpp"
@@ -53,6 +36,13 @@ public:
         if (!f)
             throw std::runtime_error("VtkExporter: cannot open " + fname.str());
 
+        // 17 significant digits round-trips an IEEE double exactly. Anything
+        // less silently quantises the data: at %.6f a converged run wrote a
+        // MomentumResidual field whose every non-zero entry was the literal
+        // convergenceTol, and scripts/validate_parallel.py's 1e-12 determinism
+        // check was comparing rounded values rather than the real ones.
+        f << std::setprecision(17);
+
         // Local extents: this file describes the block of cells this process
         // actually holds. A decomposed run writes one such block per rank, and
         // ORIGIN below places each in the global domain -- their union is the
@@ -62,24 +52,24 @@ public:
         const int NZ = s.cfg.numCellsZ + 1;
 
         // ── VTK file header ────────────────────────────────────────────────────
+        // The time in the description line is cosmetic, so it is formatted in
+        // its own stream: manipulators applied to `f` here would be sticky and
+        // would silently reformat every field value written below.
+        std::ostringstream title;
+        title << "NavSolver snapshot t=" << std::fixed << std::setprecision(6)
+              << s.simulationTime << " step=" << step;
+
         f << "# vtk DataFile Version 3.0\n";
-        f << "NavSolver snapshot t=" << std::fixed << std::setprecision(6)
-          << s.simulationTime << " step=" << step << "\n";
+        f << title.str() << "\n";
         f << "ASCII\n";
 
         // ── Grid definition ────────────────────────────────────────────────────
         f << "DATASET STRUCTURED_POINTS\n";
         f << "DIMENSIONS " << NX << " " << NY << " " << NZ << "\n";
-        // Default float formatting, not the fixed/precision(6) the header line
-        // above leaves on the stream: an undecomposed run must still write the
-        // literal "ORIGIN 0 0 0" it always has.
-        const auto savedFlags = f.flags();
-        f.unsetf(std::ios_base::floatfield);
         f << "ORIGIN "
           << s.cfg.originX * s.cfg.cellSizeX << " "
           << s.cfg.originY * s.cfg.cellSizeY << " "
           << s.cfg.originZ * s.cfg.cellSizeZ << "\n";
-        f.flags(savedFlags);
         f << "SPACING "
           << s.cfg.cellSizeX << " " << s.cfg.cellSizeY << " " << s.cfg.cellSizeZ << "\n";
 
@@ -128,15 +118,14 @@ public:
         LOG_INFO("VTK snapshot written → ", fname.str());
     }
 
-    /// Write a simple CSV convergence history line-by-line.
+    /// Append one convergence-history row.
     ///
-    /// Keeps one file handle open for the process lifetime instead of
-    /// opening/stat'ing/closing on every call — this is called once per
-    /// timestep, and a long transient run (e.g. maxTimeSteps=200000 in
-    /// production_can.cfg) would otherwise do 200,000 open+stat+close
-    /// cycles for what should be a single file opened once. Safe because
-    /// navsolver runs exactly one simulation per process; a fresh process
-    /// (fresh statics) is what starts a new run.
+    /// The handle is kept open for the process lifetime: this runs once per
+    /// timestep, and a long transient (maxTimeSteps=200000) would otherwise pay
+    /// 200,000 open+stat+close cycles for one file. Safe because navsolver runs
+    /// exactly one simulation per process. The first call TRUNCATES -- a re-run
+    /// under the same runName replaces its history rather than concatenating a
+    /// second one onto it, which left the step column resetting mid-file.
     static void writeConvergenceCSV(const SimState& s) {
         namespace fs = std::filesystem;
         static std::ofstream csvFile;
@@ -144,17 +133,14 @@ public:
         if (!csvFile.is_open()) {
             fs::create_directories(s.cfg.outputDir);
             std::string csvPath = (s.cfg.outputDir / (s.cfg.runName + "_convergence.csv")).string();
-            bool isNew = !fs::exists(csvPath);
 
-            csvFile.open(csvPath, std::ios::app);
+            csvFile.open(csvPath, std::ios::trunc);
             if (!csvFile) throw std::runtime_error("VtkExporter: cannot open " + csvPath);
 
-            if (isNew) {
-                csvFile << "step,time,ResidMax,ResidRMS,DilMax,IntDiv,IntAbsDiv,dt\n";
-            }
+            csvFile << "step,time,ResidMax,ResidRMS,DilMax,IntDiv,IntAbsDiv,dt\n";
         }
 
-        csvFile << std::fixed << std::setprecision(8)
+        csvFile << std::setprecision(17)
           << s.timeStep        << ","
           << s.simulationTime  << ","
           << s.momentumResidMax << ","

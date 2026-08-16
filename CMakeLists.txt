@@ -1,9 +1,27 @@
 cmake_minimum_required(VERSION 3.18)
 project(NavSolver LANGUAGES CXX)
 
-# C++20 for the FieldStorage concept (src/core/FieldStorage.hpp).
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Warning and per-configuration flag sets, defined once so every target gets
+# the same ones. navsolver_omp used to hardcode -O3 -DNDEBUG, so a Debug
+# configure never bounds-checked or sanitised the backend with the race risk.
+set(NAVSOLVER_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter)
+set(NAVSOLVER_RELEASE_FLAGS -O3 -DNDEBUG -march=native -funroll-loops)
+set(NAVSOLVER_DEBUG_FLAGS -O0 -g3 -DDEBUG -fsanitize=address,undefined
+                          -fno-omit-frame-pointer)
+
+function(navsolver_target_flags target)
+    target_compile_options(${target} PRIVATE
+        ${NAVSOLVER_WARNINGS}
+        $<$<CONFIG:RELEASE>:${NAVSOLVER_RELEASE_FLAGS}>
+        $<$<CONFIG:DEBUG>:${NAVSOLVER_DEBUG_FLAGS}>
+    )
+    target_link_options(${target} PRIVATE
+        $<$<CONFIG:DEBUG>:-fsanitize=address,undefined>
+    )
+endfunction()
 
 # Shared layers, by role. Every target gets all three on its include path;
 # the backend directory added per-target is what makes SimState resolve
@@ -45,23 +63,7 @@ add_executable(navsolver ${SRCS} ${CORE_SRCS} ${HOST_SRC} ${DRIVER_SRC})
 # "BackendConfig.hpp", which must resolve to THIS backend's copy.
 target_include_directories(navsolver PRIVATE ${SHARED_INC} ${SRCDIR})
 
-target_compile_options(navsolver PRIVATE
-    -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
-)
-
-# Release flags (includes NDEBUG to disable bounds checking)
-target_compile_options(navsolver PRIVATE
-    $<$<CONFIG:RELEASE>:-O3 -DNDEBUG -march=native -funroll-loops>
-)
-
-# Debug flags (no NDEBUG - bounds checking ACTIVE)
-target_compile_options(navsolver PRIVATE
-    $<$<CONFIG:DEBUG>:-O0 -g3 -DDEBUG -fsanitize=address,undefined -fno-omit-frame-pointer>
-)
-
-target_link_options(navsolver PRIVATE
-    $<$<CONFIG:DEBUG>:-fsanitize=address,undefined>
-)
+navsolver_target_flags(navsolver)
 
 # Make run target
 add_custom_target(run
@@ -104,10 +106,7 @@ if(OpenMP_CXX_FOUND)
 
     target_include_directories(navsolver_omp PRIVATE ${SHARED_INC} ${OMPSRCDIR})
 
-    target_compile_options(navsolver_omp PRIVATE
-        -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
-        -O3 -DNDEBUG -march=native -funroll-loops
-    )
+    navsolver_target_flags(navsolver_omp)
 
     target_link_libraries(navsolver_omp PRIVATE OpenMP::OpenMP_CXX)
 else()
@@ -143,8 +142,10 @@ if(CMAKE_CUDA_COMPILER)
         CUDA_STANDARD_REQUIRED ON
     )
 
+    # No Debug leg: -fsanitize and -march=native are host-compiler flags nvcc
+    # will not take, and the device code is what this target exists to measure.
     target_compile_options(navsolver_cuda PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter -O3 -DNDEBUG>
+        $<$<COMPILE_LANGUAGE:CXX>:${NAVSOLVER_WARNINGS} -O3 -DNDEBUG>
         $<$<COMPILE_LANGUAGE:CUDA>:-O3 -DNDEBUG>
     )
 
@@ -166,8 +167,13 @@ target_include_directories(navsolver_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
 )
 
+# -UNDEBUG last, so GridField's bounds check is live in every configuration.
+# The bounds-check test used to be #ifndef NDEBUG'd and reported PASS in
+# Release while compiling to nothing.
 target_compile_options(navsolver_tests PRIVATE
-    -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
+    ${NAVSOLVER_WARNINGS}
+    $<$<CONFIG:RELEASE>:-O3>
+    -UNDEBUG
 )
 
 target_compile_definitions(navsolver_tests PRIVATE
@@ -195,7 +201,9 @@ if(OpenMP_CXX_FOUND)
     )
 
     target_compile_options(navsolver_tests_omp PRIVATE
-        -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
+        ${NAVSOLVER_WARNINGS}
+        $<$<CONFIG:RELEASE>:-O3>
+        -UNDEBUG
     )
 
     target_compile_definitions(navsolver_tests_omp PRIVATE

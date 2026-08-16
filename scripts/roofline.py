@@ -36,7 +36,9 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from harness import REPO_ROOT  # noqa: E402
+
 ROOFLINE_DIR = REPO_ROOT / "scripts" / "roofline"
 RESULTS_DIR = REPO_ROOT / "experiments" / "results" / "roofline"
 FIGURES_DIR = REPO_ROOT / "experiments" / "figures"

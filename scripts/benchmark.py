@@ -32,12 +32,8 @@ import tempfile
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Same convention as scripts/validate.py: the CMake build tree by default,
-# overridable so `cmake --build build --target bench` can point here.
-BIN_DIR = Path(os.environ.get("NAVSOLVER_BIN_DIR", REPO_ROOT / "build"))
-NAVSOLVER = BIN_DIR / "navsolver"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from harness import BIN_DIR, NAVSOLVER, REPO_ROOT, build  # noqa: E402
 
 # Grid sizes only — geometry is fixed to AbruptExpansion (indices derived
 # purely from grid size, no baseUnit to misconfigure) so this harness
@@ -51,15 +47,6 @@ SIZE_MATRIX = {
 
 ACTIVE_CELLS_RE = re.compile(r"Active cells:\s*(\d+)")
 STEPS_RE = re.compile(r"Total steps\s*:\s*(\d+)")
-
-
-def build(target="navsolver"):
-    print(f"Building {target} (Release)...", file=sys.stderr)
-    subprocess.run(["cmake", "-S", str(REPO_ROOT), "-B", str(BIN_DIR),
-                     "-DCMAKE_BUILD_TYPE=Release"], check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    subprocess.run(["cmake", "--build", str(BIN_DIR), "--target", target, "-j"],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
 def make_config(nx, ny, nz, steps, num_pressure_iter, out_dir):
@@ -141,7 +128,7 @@ def main():
     threads_list = [int(t) for t in args.threads.split(",")] if args.threads else [None]
 
     if not args.skip_build:
-        build(args.binary)
+        build(args.binary, required=(args.binary,))
     elif not binary_path.exists():
         ap.error(f"{binary_path} not found; run without --skip-build first")
 

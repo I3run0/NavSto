@@ -11,11 +11,13 @@
 #include <string>
 #include <cstddef>
 
-/// Compact description of the staggered-grid extents.
+/// Allocated extents, which are numCells + 2 per axis, not + 1: indices run
+/// 0..numCells, plus one ghost layer the pressure solve mirrors Neumann values
+/// into. See SimState::allocateFields().
 struct GridSize {
-    int sI = 0;   ///< numCellsX + 1
-    int sJ = 0;   ///< numCellsY + 1
-    int sK = 0;   ///< numCellsZ + 1
+    int sI = 0;   ///< numCellsX + 2
+    int sJ = 0;   ///< numCellsY + 2
+    int sK = 0;   ///< numCellsZ + 2
 };
 
 // ---------------------------------------------------------------------------
@@ -79,14 +81,4 @@ private:
             );
         }
     }
-};
-
-/// Coefficient vector with Pascal-style "logical index + 1" offset.
-class CoeffVector {
-public:
-    explicit CoeffVector(int n) : data_(n + 2, 0.0) {}
-    double& operator[](int logIdx)       { return data_[logIdx + 1]; }
-    double  operator[](int logIdx) const { return data_[logIdx + 1]; }
-private:
-    std::vector<double> data_;
 };

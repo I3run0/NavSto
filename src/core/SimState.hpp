@@ -11,7 +11,6 @@
 // =============================================================================
 
 #include "BackendConfig.hpp"
-#include "FieldStorage.hpp"
 #include "GridField.hpp"
 #include "SimConfig.hpp"
 
@@ -37,29 +36,23 @@ struct SimState {
     std::vector<int> iLow, iHigh;   // leftmost/rightmost active i for row j
     std::vector<int> jLow, jHigh;   // lowest/highest active j for column i
 
+    /// Last i of buildInitialPressure's ramp; the x where the domain steps.
+    /// The other shape indices (degreeIndexY, the ramp corners) are locals in
+    /// Setup.cpp — nothing outside geometry construction ever read them.
     int degreeIndex1  = 0;
     int degreeIndex2  = 0;
-    int degreeIndexY  = 0;
-    int jLowInitial   = 0;
-    int jHighFinal    = 0;
-    int rampIndexX1   = 0;
-    int rampIndexX2   = 0;
-    int rampIndexY1   = 0;
-    int rampIndexY2   = 0;
-    int numActiveCells = 0;
+    int numActiveCells = 0;   ///< reported in the startup banner
 
     // ── Time integration state ─────────────────────────────────────────────────
     int    timeStep      = 0;
-    int    midPlaneZ     = 0;
-    int    iResidMax = 0, jResidMax = 0, kResidMax = 0;
-    int    iDilMax   = 0, jDilMax   = 0, kDilMax   = 0;
-    int    counter   = 0;
     bool   useHalfStep = false;   // true during RK sub-steps 1 & 2
 
     double timeStepSize    = 0.0;
     double simulationTime  = 0.0;
 
-    double maxVelocityChange   = 0.0;
+    // Diagnostics the driver logs and VtkExporter writes. Anything computed
+    // per cell but never read (the argmax indices, maxVelocityChange) is gone:
+    // it was work inside the kernels these benchmarks time.
     double momentumResidMax    = 0.0;
     double momentumResidRMS    = 0.0;
     double dilatationMax       = 0.0;
@@ -69,11 +62,6 @@ struct SimState {
     double initialPressureGradY = 0.0;
     double uMaxAtInlet  = 0.0;
     double vMaxAtInlet  = 0.0;
-    double hyperViscousDecay = 0.0;
-
-    static_assert(FieldStorage<Field>,
-                  "this backend's Field does not satisfy FieldStorage "
-                  "— see src/core/FieldStorage.hpp and your BackendConfig.hpp");
 
     // ── 3-D field arrays ───────────────────────────────────────────────────────
     Field velX;            ///< u — x-velocity

@@ -3,13 +3,9 @@
 //  AccelScratch.hpp — computeAccelerations()'s coefficient buffers.
 //
 //  numThreads slices; each thread indexes its own via tid*scratchLenPerThread
-//  (a shared buffer would race). Slice lengths are padded to a cache line.
-//
-//  Reuse without re-zeroing is safe: the index range each call touches is
-//  fixed by geometry, and every entry in it is written before it is read.
-//
-//  A backend wanting a different layout should put its own buffers in its
-//  Extras instead — nothing outside its kernels reads these.
+//  (a shared buffer would race), padded to a cache line. Reuse without
+//  re-zeroing is safe: geometry fixes the range each call touches, and every
+//  entry in it is written before it is read.
 // =============================================================================
 
 #include "SimConfig.hpp"

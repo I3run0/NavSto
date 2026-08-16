@@ -39,17 +39,15 @@ Usage:
 """
 
 import argparse
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from validate import (REPO_ROOT, BIN_DIR, NAVSOLVER, NAVSOLVER_OMP,  # noqa: E402
-                       parse_vtk_scalar, REDBLACK_CFG_TEMPLATE, REDBLACK_TOL)
-from validate_parallel import compare_velocity_fields  # noqa: E402
-
-NAVSOLVER_CUDA = BIN_DIR / "navsolver_cuda"
+from harness import (NAVSOLVER, NAVSOLVER_OMP, NAVSOLVER_CUDA,  # noqa: E402
+                     build, compare_pressure_gauge_fixed,
+                     compare_velocity_fields, run)
+from validate import REDBLACK_CFG_TEMPLATE, REDBLACK_TOL  # noqa: E402
 
 DETERMINISM_TOL = 1e-12
 
@@ -73,76 +71,18 @@ runName = cuda_det
 """
 
 
-def build():
-    print("Building (Release, CMake)...", file=sys.stderr)
-    build_dir = REPO_ROOT / "build"
-    subprocess.run(["cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
-                     "-DCMAKE_BUILD_TYPE=Release"], check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    subprocess.run(["cmake", "--build", str(build_dir), "--target", "navsolver", "-j"],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    # navsolver_omp is the reference for check_rk4_equivalence; not fatal if
-    # this machine has no OpenMP, that check skips itself.
-    subprocess.run(["cmake", "--build", str(build_dir), "--target", "navsolver_omp", "-j"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    result = subprocess.run(["cmake", "--build", str(build_dir), "--target", "navsolver_cuda", "-j"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    if result.returncode == 0:
-        import shutil
-        # No-op when NAVSOLVER_BIN_DIR already points at build_dir (the
-        # ctest path) -- shutil.copy would raise SameFileError there.
-        for built, dest in ((build_dir / "navsolver_cuda", NAVSOLVER_CUDA),
-                            (build_dir / "navsolver_omp", NAVSOLVER_OMP),
-                            (build_dir / "navsolver", NAVSOLVER)):
-            if built.exists() and built.resolve() != dest.resolve():
-                shutil.copy(built, dest)
-    return result.returncode == 0 and NAVSOLVER_CUDA.exists()
-
-
-def run(binary, cfg_path):
-    result = subprocess.run([str(binary), str(cfg_path)], capture_output=True,
-                             text=True, cwd=REPO_ROOT)
-    if result.returncode != 0:
-        raise RuntimeError(f"{binary} exited {result.returncode}:\n{result.stderr}\n{result.stdout}")
-
-
 def check_redblack_equivalence():
     print("== Red-black equivalence: navsolver vs navsolver_cuda (gauge-fixed) ==")
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = Path(tmp) / "redblack.cfg"
-
-        out_serial = Path(tmp) / "serial"
-        cfg_path.write_text(REDBLACK_CFG_TEMPLATE.format(out=out_serial))
-        run(NAVSOLVER, cfg_path)
-
-        out_cuda = Path(tmp) / "cuda"
-        cfg_path.write_text(REDBLACK_CFG_TEMPLATE.format(out=out_cuda))
-        run(NAVSOLVER_CUDA, cfg_path)
-
-        vtk_serial = out_serial / "redblack_check_t000001.vtk"
-        vtk_cuda = out_cuda / "redblack_check_t000001.vtk"
-        (nx, ny, nz), press_serial, _ = parse_vtk_scalar(vtk_serial, "Pressure")
-        (nx2, ny2, nz2), press_cuda, _ = parse_vtk_scalar(vtk_cuda, "Pressure")
-        if (nx, ny, nz) != (nx2, ny2, nz2):
-            print("  FAIL: grid size mismatch between serial and CUDA output")
-            return False
-
-        mean_serial = sum(press_serial) / len(press_serial)
-        mean_cuda = sum(press_cuda) / len(press_cuda)
-        diffs_sq = 0.0
-        serial_sq = 0.0
-        for ps, pc in zip(press_serial, press_cuda):
-            d = (ps - mean_serial) - (pc - mean_cuda)
-            diffs_sq += d * d
-            serial_sq += (ps - mean_serial) ** 2
-        l2_rel = (diffs_sq / max(serial_sq, 1e-30)) ** 0.5
-
-        if l2_rel > REDBLACK_TOL:
-            print(f"  FAIL: gauge-fixed pressure fields disagree "
-                  f"(L2_rel={l2_rel:.3e}, tol={REDBLACK_TOL:.0e})")
-            return False
-        print(f"  PASS: gauge-fixed pressure fields agree (L2_rel={l2_rel:.3e})")
-        return True
+        vtks = []
+        for label, binary in (("serial", NAVSOLVER), ("cuda", NAVSOLVER_CUDA)):
+            out_dir = Path(tmp) / label
+            cfg_path.write_text(REDBLACK_CFG_TEMPLATE.format(out=out_dir))
+            run(binary, cfg_path)
+            vtks.append(out_dir / "redblack_check_t000001.vtk")
+        return compare_pressure_gauge_fixed(vtks[0], vtks[1], REDBLACK_TOL,
+                                            "serial vs cuda")
 
 
 RK4_TOL = 1e-12
@@ -279,9 +219,10 @@ def main():
     args = ap.parse_args()
 
     if not args.skip_build:
-        if not build():
-            print("navsolver_cuda build failed / no CUDA toolchain -- nothing to check.", file=sys.stderr)
-            sys.exit(0)
+        # navsolver_omp is the reference for check_rk4_equivalence; not fatal
+        # if this machine has no OpenMP, that check skips itself.
+        build("navsolver", "navsolver_omp", "navsolver_cuda",
+              required=("navsolver",))
     elif not (NAVSOLVER.exists() and NAVSOLVER_CUDA.exists()):
         ap.error(f"{NAVSOLVER} / {NAVSOLVER_CUDA} not found; run without --skip-build first")
 

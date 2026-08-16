@@ -596,7 +596,7 @@ void solvePressurePoissonCuda(DeviceState& d) {
 //  updateVelocities
 // ═════════════════════════════════════════════════════════════════════════
 
-__global__ void updateVelocitiesKernel(DeviceState d, double dtEff, double* maxChangeScratch) {
+__global__ void updateVelocitiesKernel(DeviceState d, double dtEff) {
     const long long total = (long long)d.numCellsXm1 * (d.numCellsY + 1) * d.numCellsZ;
     const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     if (tid >= total) return;
@@ -606,10 +606,7 @@ __global__ void updateVelocitiesKernel(DeviceState d, double dtEff, double* maxC
     const int k = 1 + (int)(rem % d.numCellsZ);
 
     const int KKfim = d.solidWall ? d.numCellsZm1 : d.numCellsZ;
-    if (i > d.numCellsXm1 || j < d.jLow[i] + 1 || j > d.jHigh[i] - 1 || k > KKfim) {
-        maxChangeScratch[tid] = 0.0;
-        return;
-    }
+    if (i > d.numCellsXm1 || j < d.jLow[i] + 1 || j > d.jHigh[i] - 1 || k > KKfim) return;
     const int ip = i + 1, jp = j + 1;
     const int kp = (k < d.numCellsZ) ? k + 1 : 1;
     const double qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
@@ -628,8 +625,6 @@ __global__ void updateVelocitiesKernel(DeviceState d, double dtEff, double* maxC
     VELX(d,i,j,k) += du * dtEff;
     VELY(d,i,j,k) += dv * dtEff;
     VELZ(d,i,j,k) += dw * dtEff;
-
-    maxChangeScratch[tid] = sqrt(du*du + dv*dv + dw*dw);
 }
 
 __global__ void outletBCKernel(DeviceState d, bool zeroSecondDeriv) {
@@ -668,7 +663,7 @@ __global__ void periodicCopyVelKernel(DeviceState d) {
 
 void updateVelocitiesCuda(DeviceState& d, bool useHalfStep, double timeStepSize) {
     const double dtEff = useHalfStep ? 0.5 * timeStepSize : timeStepSize;
-    updateVelocitiesKernel<<<gridFor(d.maxCellDomain), CUDA_BLOCK>>>(d, dtEff, d.cellScratch1);
+    updateVelocitiesKernel<<<gridFor(d.maxCellDomain), CUDA_BLOCK>>>(d, dtEff);
 
     outletBCKernel<<<gridFor((long long)(d.numCellsY+2)*(d.numCellsZ+2)), CUDA_BLOCK>>>(d, !d.outletZeroFirstDeriv);
     if (d.periodic)

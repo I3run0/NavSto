@@ -36,14 +36,13 @@ Usage:
 """
 
 import argparse
-import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from validate import REPO_ROOT, NAVSOLVER, NAVSOLVER_OMP, parse_vtk_velocity  # noqa: E402
+from harness import (NAVSOLVER, NAVSOLVER_OMP,  # noqa: E402
+                     build, compare_velocity_fields, run)
 
 EQUIVALENCE_TOL = 1e-10   # relative, navsolver_omp vs navsolver (floating-point reordering)
 DETERMINISM_TOL = 1e-12   # relative, navsolver_omp vs itself at a fixed thread count
@@ -79,54 +78,6 @@ CONFIGS = {
                                      shape="RoundedCorner", lateral="Periodic",
                                      profile="PotentialFlow"),
 }
-
-
-def build():
-    print("Building (Release + OpenMP)...", file=sys.stderr)
-    subprocess.run(["make", "clean"], cwd=REPO_ROOT, check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["make", "all"], cwd=REPO_ROOT, check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    subprocess.run(["make", "openmp"], cwd=REPO_ROOT, check=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-
-def run(binary, cfg_path, threads=None):
-    env = dict(os.environ)
-    if threads is not None:
-        env["OMP_NUM_THREADS"] = str(threads)
-    result = subprocess.run([str(binary), str(cfg_path)], capture_output=True,
-                             text=True, cwd=REPO_ROOT, env=env)
-    if result.returncode != 0:
-        raise RuntimeError(f"{binary} exited {result.returncode}:\n{result.stderr}\n{result.stdout}")
-
-
-def compare_velocity_fields(vtk_a, vtk_b, tol, label):
-    dims_a, at_a = parse_vtk_velocity(vtk_a)
-    dims_b, at_b = parse_vtk_velocity(vtk_b)
-    if dims_a != dims_b:
-        print(f"  FAIL {label}: grid size mismatch {dims_a} vs {dims_b}")
-        return False
-
-    nx, ny, nz = dims_a
-    sq_err, sq_ref, max_rel = 0.0, 0.0, 0.0
-    for i in range(nx):
-        for j in range(ny):
-            for k in range(nz):
-                ua, ub = at_a(i, j, k), at_b(i, j, k)
-                for c in range(3):
-                    d = ua[c] - ub[c]
-                    sq_err += d * d
-                    sq_ref += ua[c] * ua[c]
-                    denom = max(abs(ua[c]), 1e-12)
-                    max_rel = max(max_rel, abs(d) / denom)
-    l2_rel = (sq_err / max(sq_ref, 1e-30)) ** 0.5
-
-    if l2_rel > tol:
-        print(f"  FAIL {label}: L2_rel={l2_rel:.3e} (tol={tol:.0e}, max pointwise rel={max_rel:.3e})")
-        return False
-    print(f"  PASS {label}: L2_rel={l2_rel:.3e}")
-    return True
 
 
 def check_thread_equivalence(threads_list):
@@ -184,7 +135,7 @@ def main():
     threads_list = [int(t) for t in args.threads.split(",")]
 
     if not args.skip_build:
-        build()
+        build("navsolver", "navsolver_omp", required=("navsolver",))
     elif not (NAVSOLVER.exists() and NAVSOLVER_OMP.exists()):
         ap.error(f"{NAVSOLVER} / {NAVSOLVER_OMP} not found; run without --skip-build first")
 

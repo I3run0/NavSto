@@ -13,9 +13,12 @@
 //
 //  Started as a full copy of src/backends/serial/Physics.cpp (deliberately, not
 //  #ifdef-branched into the serial file — see docs/openmp-parallelization.md
-//  for that tradeoff) with computeAccelerations() and solvePressurePoisson()
-//  modified for parallelism; the remaining per-step kernels are unchanged
-//  from serial.
+//  for that tradeoff). Everything that is not backend-specific now lives in
+//  src/solver/ and is included by both.
+//
+//  Every kernel here is parallel. Five of them used to be verbatim serial
+//  copies, which put 37% of per-step time outside the thread team and capped
+//  the measurable speedup at ~2.3x however many cores the machine had.
 //
 //  Geometry and initial conditions are NOT duplicated here: they moved to
 //  src/solver/Setup.cpp, shared by every backend. This file holds only
@@ -25,6 +28,7 @@
 #include "Physics.hpp"
 #include "Logger.hpp"
 #include "Geometry.hpp"
+#include "VelocityBCs.hpp"
 #include "ViscosityModel.hpp"
 
 #include <cmath>
@@ -34,74 +38,6 @@
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 namespace {
-
-// ---------------------------------------------------------------------------
-//  UNIFAES weight π(Pe):  blends upwind and central differencing so that the
-//  scheme is exact for 1-D steady advection-diffusion at any Péclet number.
-// ---------------------------------------------------------------------------
-void computeExponentialWeights(double localRe, double DPe,
-                               double& pip,
-                               double& coeffEast, double& coeffWest)
-{
-    if (std::abs(DPe) < 0.1) {
-        // Polynomial approximation — numerically stable near Pe = 0
-        pip = 1.0 / ((((0.05*DPe + 0.25)*DPe + 1.0)*DPe/6.0 + 0.5)*DPe + 1.0);
-    } else if (std::abs(DPe) <= 200.0) {
-        pip = DPe / (std::exp(DPe) - 1.0);  // exact Bernstein-Crank formula
-    } else if (DPe > 200.0) {
-        pip = 0.0;    // advection strongly left-to-right; east weight vanishes
-    } else {
-        pip = -DPe;   // advection strongly right-to-left
-    }
-
-    const double pim = DPe + pip;
-    coeffEast = pip / localRe;
-    coeffWest = pim / localRe;
-}
-
-// ---------------------------------------------------------------------------
-//  UNIFAES cross-term blending weight ξ.
-// ---------------------------------------------------------------------------
-double computeQsi(double DPe, double pip, double xeOverDx)
-{
-    if (std::abs(DPe) < 0.01)
-        return DPe * (1.0 - DPe * DPe / 60.0) / 12.0 + xeOverDx - 0.5;
-    return (pip - 1.0) / DPe + xeOverDx;
-}
-
-// ---------------------------------------------------------------------------
-//  Apply outlet and periodic boundary conditions to velocity.
-// ---------------------------------------------------------------------------
-void applyVelocityBCs(SimState& s)
-{
-    const int KKfim = (s.cfg.lateralCondition == LateralBC::SolidWall)
-                    ? s.numCellsZm1 : s.cfg.numCellsZ;
-
-    if (s.cfg.outletCondition == OutletBC::ZeroFirstDeriv) {
-        for (int j = s.jLow[s.cfg.numCellsX]+1; j <= s.jHigh[s.cfg.numCellsX]-1; ++j)
-            for (int k = 0; k <= KKfim; ++k) {
-                s.velX(s.cfg.numCellsX, j, k) = s.velX(s.numCellsXm1, j, k);
-                s.velY(s.cfg.numCellsX, j, k) = s.velY(s.numCellsXm1, j, k);
-                s.velZ(s.cfg.numCellsX, j, k) = s.velZ(s.numCellsXm1, j, k);
-            }
-    }
-    if (s.cfg.outletCondition == OutletBC::ZeroSecondDeriv) {
-        for (int j = s.jLow[s.cfg.numCellsX]+1; j <= s.jHigh[s.cfg.numCellsX]-1; ++j)
-            for (int k = 0; k <= KKfim; ++k) {
-                s.velX(s.cfg.numCellsX, j, k) = 2.0*s.velX(s.numCellsXm1, j, k) - s.velX(s.cfg.numCellsX-2, j, k);
-                s.velY(s.cfg.numCellsX, j, k) = 2.0*s.velY(s.numCellsXm1, j, k) - s.velY(s.cfg.numCellsX-2, j, k);
-                s.velZ(s.cfg.numCellsX, j, k) = 2.0*s.velZ(s.numCellsXm1, j, k) - s.velZ(s.cfg.numCellsX-2, j, k);
-            }
-    }
-    if (s.cfg.lateralCondition == LateralBC::Periodic) {
-        for (int i = 1; i <= s.numCellsXm1; ++i)
-            for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
-                s.velX(i, j, 0) = s.velX(i, j, s.cfg.numCellsZ);
-                s.velY(i, j, 0) = s.velY(i, j, s.cfg.numCellsZ);
-                s.velZ(i, j, 0) = s.velZ(i, j, s.cfg.numCellsZ);
-            }
-    }
-}
 
 // ---------------------------------------------------------------------------
 //  Red-black solvePressurePoisson helpers.
@@ -118,48 +54,19 @@ void applyVelocityBCs(SimState& s)
 // ---------------------------------------------------------------------------
 
 /// Mirrors Neumann boundary press() values into the ghost layer for the
-/// CURRENT press field state. Periodic-Z doesn't need mirroring here --
-/// updateColor() reads wrapped k indices directly instead.
+/// CURRENT press field state. Periodic-Z needs no mirroring -- updateColor()
+/// reads wrapped k indices directly.
 ///
-/// v1 of this function (see git history) was fully serial: an earlier
-/// attempt at `#pragma omp parallel for` on the `i` loop hit a real data
-/// race, found via a determinism check (results varied run-to-run at a
-/// fixed thread count under schedule(static), which shouldn't happen if
-/// race-free): the `j==jLoopS`/`j==jLoopN` writes target
-/// `press(i, j-1|j+1, k)` -- SAME row i as the writing thread -- but a
-/// DIFFERENT thread processing i+1 can ALSO write into row i via its own
-/// im=i target (`i+1 == s.iLow[j']+1` for some j'), and if that j'
-/// coincides with this thread's j-1/j+1 target, two threads write the same
-/// address with different values.
+/// Split into two passes to be race-free, and the split is load-bearing:
+///   Pass A -- cross-row writes only, targeting row i-1 or i+1, never row i.
+///   Pass B -- same-row writes only, targeting this thread's own row i.
+/// Interleaved, a thread on row i+1 can write into row i via its own im
+/// target while the thread on row i writes the same address via j+-1. The
+/// implicit barrier between the passes (neither uses nowait) is what makes
+/// Pass B safe. See docs/openmp-parallelization.md.
 ///
-/// v2 (this version) separates the two write categories into two passes
-/// with a barrier between (the implicit barrier at the end of the first
-/// `#pragma omp for`, since neither loop uses `nowait`):
-///   Pass A -- only the im/ip (cross-row) writes, which target row i-1 or
-///             i+1, NEVER row i itself.
-///   Pass B -- only the same-row writes (j-extension and, for SolidWall,
-///             the k ghost layer), which by construction only ever target
-///             (i, ...) -- this thread's OWN row -- so once Pass A has
-///             fully completed (guaranteed by the barrier), no other
-///             thread can still be writing into row i and Pass B is
-///             race-free.
-/// (Pass A itself has no cross-thread collision either: two different i's
-/// im/ip writes could only target the same neighbor row if some row j had
-/// iLow[j] > iHigh[j], i.e. an inverted/empty active span, which doesn't
-/// happen for a valid active row -- same reasoning the original,
-/// incomplete race analysis already relied on, see git history.)
-///
-/// MUST be called from inside an enclosing `#pragma omp parallel` region
-/// (see solvePressurePoisson) -- both `#pragma omp for` below are orphaned
-/// worksharing constructs, standard OpenMP, bind to whatever team is
-/// currently active.
-///
-/// No ThreadSanitizer available in this WSL2 sandbox to verify formally
-/// (same limitation as `perf`, see docs/roofline.md), so this was verified
-/// with the SAME determinism methodology that caught the original race:
-/// OMP_NUM_THREADS=12, config run 5 times, DilMax bit-identical every run,
-/// matching the 1-thread/serial reference -- see
-/// docs/openmp-parallelization.md for the actual run log.
+/// MUST be called from inside an enclosing `#pragma omp parallel` region --
+/// both `#pragma omp for` below are orphaned worksharing constructs.
 void mirrorGhostCells(SimState& s) {
     const auto& cfg = s.cfg;
 
@@ -167,12 +74,7 @@ void mirrorGhostCells(SimState& s) {
     #pragma omp for schedule(static)
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         const int im = i - 1, ip = i + 1;
-        int jLoopS, jLoopN;
-        if      (s.jLow[im]  >= s.jLow[i])  jLoopS = s.jLow[i]+1;
-        else                                  jLoopS = s.jLow[i];
-        if      (s.jHigh[im] <= s.jHigh[i]) jLoopN = s.jHigh[i];
-        else                                  jLoopN = s.jHigh[i]+1;
-        if (i == s.degreeIndex2) { jLoopS = s.jLow[im]+1; jLoopN = s.jHigh[im]; }
+        int jLoopS, jLoopN; mirrorJRange(s, i, jLoopS, jLoopN);
 
         for (int k = 1; k <= cfg.numCellsZ; ++k) {
             for (int j = jLoopS; j <= jLoopN; ++j) {
@@ -186,13 +88,7 @@ void mirrorGhostCells(SimState& s) {
     // Pass B: same-row writes only (into row i itself).
     #pragma omp for schedule(static)
     for (int i = 1; i <= cfg.numCellsX; ++i) {
-        const int im = i - 1;
-        int jLoopS, jLoopN;
-        if      (s.jLow[im]  >= s.jLow[i])  jLoopS = s.jLow[i]+1;
-        else                                  jLoopS = s.jLow[i];
-        if      (s.jHigh[im] <= s.jHigh[i]) jLoopN = s.jHigh[i];
-        else                                  jLoopN = s.jHigh[i]+1;
-        if (i == s.degreeIndex2) { jLoopS = s.jLow[im]+1; jLoopN = s.jHigh[im]; }
+        int jLoopS, jLoopN; mirrorJRange(s, i, jLoopS, jLoopN);
 
         for (int k = 1; k <= cfg.numCellsZ; ++k) {
             for (int j = jLoopS; j <= jLoopN; ++j) {
@@ -210,22 +106,14 @@ void mirrorGhostCells(SimState& s) {
 enum class RBColor { Red, Black };
 
 /// Updates every cell of one color across all active rows — embarrassingly
-/// parallel: by construction every cell of `color` only reads neighbors of
-/// the OTHER color, all fixed for the duration of this call. Correctness
-/// (same fixed point as the original single-sweep Gauss-Seidel/SOR,
-/// verified via scripts/validate.py's red-black tier) was established
-/// BEFORE adding the #pragma omp below -- see docs/openmp-parallelization.md
-/// for why serial-first.
+/// parallel: a cell of `color` only reads neighbors of the OTHER color, all
+/// fixed for this call's duration.
 ///
-/// MUST be called from inside an enclosing `#pragma omp parallel` region
-/// (see solvePressurePoisson) -- the `#pragma omp for` below is an
-/// orphaned worksharing construct, standard OpenMP, binds to whatever team
-/// is currently active. Iterates the caller's active-row list (one (i,j)
-/// row list drives BOTH colors -- see Geometry.hpp) with a direct strided inner
-/// k-loop instead of dereferencing a per-cell index list: replaces a
-/// gather (defeats prefetching) with unit-stride-2 access, which is what
-/// the roofline's "5% of bandwidth ceiling despite low AI" finding pointed
-/// at (latency-bound via indirection, not bandwidth-bound).
+/// MUST be called from inside an enclosing `#pragma omp parallel` region --
+/// the `#pragma omp for` below is an orphaned worksharing construct. Walks
+/// the row list with a strided inner k-loop rather than a per-cell index
+/// list: unit-stride-2 instead of a gather, which is what the roofline's
+/// "5% of bandwidth ceiling despite low AI" finding pointed at.
 void updateColor(SimState& s, const std::vector<RowIndex>& activeRows, RBColor color,
                   double cX, double cY, double cZ, double invDiag,
                   int iRef, int jRef, int kRef, double pRef) {
@@ -577,7 +465,11 @@ void buildPressureSource(SimState& s)
 {
     const auto& cfg = s.cfg;
 
-    // Zero acceleration on all boundary (wall) nodes
+    // Zero acceleration on all boundary (wall) nodes. Two separate loops with
+    // the implicit barrier between them: iteration i writes only column i and
+    // iteration j only row j, so neither loop races with itself, and the
+    // corners both of them touch are written 0.0 either way.
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i <= cfg.numCellsX; ++i)
         for (int k = 0; k <= cfg.numCellsZ; ++k) {
             const int jB = s.jLow[i], jT = s.jHigh[i];
@@ -585,6 +477,7 @@ void buildPressureSource(SimState& s)
             s.accelY(i,jB,k) = s.accelY(i,jT,k) = 0.0;
             s.accelZ(i,jB,k) = s.accelZ(i,jT,k) = 0.0;
         }
+    #pragma omp parallel for schedule(static)
     for (int j = 0; j <= cfg.numCellsY; ++j)
         for (int k = 0; k <= cfg.numCellsZ; ++k) {
             const int iL = s.iLow[j], iR = s.iHigh[j];
@@ -598,10 +491,12 @@ void buildPressureSource(SimState& s)
     const double qInvDz = 0.25 / cfg.cellSizeZ;
     const double invDt  = 1.0  / s.timeStepSize;
 
+    // Parallel over i: iteration i writes only pressureSource(i,·,·) and reads
+    // vel/accel at i and i-1, which no iteration modifies.
+    #pragma omp parallel for schedule(static)
     for (int i = 1; i <= cfg.numCellsX; ++i) {
-        const int im  = i - 1;
-        const int jS  = (i != s.degreeIndex2) ? s.jLow[i]+1  : s.jLow[im]+1;
-        const int jN  = (i != s.degreeIndex2) ? s.jHigh[i]   : s.jHigh[im];
+        const int im = i - 1;
+        int jS, jN; activeJRange(s, i, jS, jN);
 
         for (int j = jS; j <= jN; ++j) {
             const int jm = j - 1;
@@ -649,19 +544,11 @@ void buildPressureSource(SimState& s)
 //  verified via scripts/validate.py's red-black tier, not a golden-field
 //  diff.
 //
-//  One #pragma omp parallel region wraps the ENTIRE sweep loop (all
-//  numPressureIter sweeps), not one region per updateColor() call. The
-//  first version of this function opened/closed a thread team on every
-//  single updateColor() call -- 2 colors x numPressureIter sweeps = 10
-//  team spawn/joins per solve at the default numPressureIter=5, every
-//  single timestep. That fixed per-spawn overhead doesn't scale with grid
-//  size, which is a plausible driver of the originally-measured
-//  small-grid-regresses-at-high-thread-count scaling (see
-//  docs/openmp-parallelization.md's Performance section, pre-this-change
-//  numbers). mirrorGhostCells() is now ALSO parallel internally (two-pass,
-//  see its own comment above) -- called directly by every thread here
-//  (not wrapped in `#pragma omp single`), its own `#pragma omp for`
-//  passes provide the necessary synchronization.
+//  ONE parallel region wraps all numPressureIter sweeps, not one per
+//  updateColor() call: that would spawn and join a team 2*numPressureIter
+//  times per solve, per timestep, at a fixed cost that does not shrink with
+//  grid size. mirrorGhostCells() is called by every thread here, not under
+//  `omp single` -- its own orphaned `omp for` passes synchronise it.
 // ---------------------------------------------------------------------------
 void solvePressurePoisson(SimState& s)
 {
@@ -704,8 +591,10 @@ void updateVelocities(SimState& s)
     const double qInvDz = 0.25 / cfg.cellSizeZ;
     const double dt_eff = s.useHalfStep ? 0.5 * s.timeStepSize : s.timeStepSize;
     const int KKfim = (cfg.lateralCondition == LateralBC::SolidWall) ? s.numCellsZm1 : cfg.numCellsZ;
-    s.maxVelocityChange = 0.0;
 
+    // Parallel over i: iteration i writes only vel*(i,·,·); press and accel are
+    // read-only here, so nothing another iteration writes is read.
+    #pragma omp parallel for schedule(static)
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int ip = i + 1;
         for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
@@ -727,9 +616,6 @@ void updateVelocities(SimState& s)
                 s.velX(i,j,k) += du * dt_eff;
                 s.velY(i,j,k) += dv * dt_eff;
                 s.velZ(i,j,k) += dw * dt_eff;
-
-                const double mag = std::sqrt(du*du + dv*dv + dw*dw);
-                s.maxVelocityChange = std::max(s.maxVelocityChange, mag);
             }
             if (cfg.lateralCondition == LateralBC::Periodic) {
                 s.velX(i,j,0) = s.velX(i,j,cfg.numCellsZ);
@@ -755,8 +641,17 @@ void computeMomentumResidual(SimState& s)
 
     s.momentumResidMax = 0.0;
     s.momentumResidRMS = 0.0;
-    s.counter          = 0;
 
+    // residMax is a max reduction, so it is exact regardless of how the team
+    // is scheduled -- which matters because the driver's convergence test
+    // reads it, and a thread-count-dependent stopping step would make the
+    // backends incomparable. residRMS is a sum and so is order-dependent at
+    // the last couple of ULPs; it is reported, never used for control flow.
+    double residMax = 0.0, residSumSq = 0.0;
+    long long count = 0;
+
+    #pragma omp parallel for schedule(static) \
+            reduction(max:residMax) reduction(+:residSumSq,count)
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int ip = i + 1;
         for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
@@ -781,17 +676,15 @@ void computeMomentumResidual(SimState& s)
                 const double resNorm  = std::sqrt(resSq);
                 s.scratchField(i,j,k) = resNorm;
 
-                if (resNorm > s.momentumResidMax) {
-                    s.momentumResidMax = resNorm;
-                    s.iResidMax = i; s.jResidMax = j; s.kResidMax = k;
-                }
-                s.momentumResidRMS += resSq;
-                ++s.counter;
+                residMax = std::max(residMax, resNorm);
+                residSumSq += resSq;
+                ++count;
             }
         }
     }
-    if (s.counter > 0)
-        s.momentumResidRMS = std::sqrt(s.momentumResidRMS / s.counter);
+    s.momentumResidMax = residMax;
+    if (count > 0)
+        s.momentumResidRMS = std::sqrt(residSumSq / static_cast<double>(count));
 }
 
 // ---------------------------------------------------------------------------
@@ -804,14 +697,13 @@ void computeDivergence(SimState& s)
     const double qInvDy = 0.25 / cfg.cellSizeY;
     const double qInvDz = 0.25 / cfg.cellSizeZ;
 
-    s.dilatationMax    = 0.0;
-    s.intDivergence    = 0.0;
-    s.intAbsDivergence = 0.0;
+    double dilMax = 0.0, intDiv = 0.0, intAbsDiv = 0.0;
 
+    #pragma omp parallel for schedule(static) \
+            reduction(max:dilMax) reduction(+:intDiv,intAbsDiv)
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         const int im = i - 1;
-        const int jS = (i != s.degreeIndex2) ? s.jLow[i]+1  : s.jLow[im]+1;
-        const int jN = (i != s.degreeIndex2) ? s.jHigh[i]   : s.jHigh[im];
+        int jS, jN; activeJRange(s, i, jS, jN);
 
         for (int j = jS; j <= jN; ++j) {
             const int jm = j - 1;
@@ -826,18 +718,16 @@ void computeDivergence(SimState& s)
                   + (s.velZ(i,j,k) + s.velZ(i,jm,k) + s.velZ(im,j,k) + s.velZ(im,jm,k)
                    - s.velZ(i,j,km) - s.velZ(i,jm,km) - s.velZ(im,j,km) - s.velZ(im,jm,km)) * qInvDz;
 
-                s.intDivergence    += div;
-                s.intAbsDivergence += std::abs(div);
-                if (std::abs(div) > s.dilatationMax) {
-                    s.dilatationMax = std::abs(div);
-                    s.iDilMax = i; s.jDilMax = j; s.kDilMax = k;
-                }
+                intDiv    += div;
+                intAbsDiv += std::abs(div);
+                dilMax     = std::max(dilMax, std::abs(div));
             }
         }
     }
     const double cellVol = cfg.cellSizeX * cfg.cellSizeY * cfg.cellSizeZ;
-    s.intDivergence    *= cellVol;
-    s.intAbsDivergence *= cellVol;
+    s.dilatationMax    = dilMax;
+    s.intDivergence    = intDiv * cellVol;
+    s.intAbsDivergence = intAbsDiv * cellVol;
 }
 
 // ---------------------------------------------------------------------------
@@ -848,6 +738,21 @@ void adaptTimeStep(SimState& s)
     const auto& cfg = s.cfg;
     double uMax = 0.0, vMax = 0.0, wMax = 0.0;
 
+    // Max reductions only, so dt is bit-identical at any thread count -- and
+    // at any value of the if() below. It feeds every subsequent step, so an
+    // order-dependent dt would make two runs of the same config diverge.
+    //
+    // The if(): this is by far the cheapest kernel (three reads per cell, no
+    // stores), so on a small grid a 12-thread fork/join costs more than the
+    // whole loop -- measured 0.140ms serial, 0.070ms on 2 threads, 0.716ms on
+    // 12 at 96x48x24. Demanding ~10k iterations per thread before going
+    // parallel keeps the win at production sizes without that cliff.
+    const long long cells = static_cast<long long>(cfg.numCellsX) *
+                            cfg.numCellsY * cfg.numCellsZ;
+    const bool worthThreading = cells >= 10000LL * omp_get_max_threads();
+
+    #pragma omp parallel for schedule(static) reduction(max:uMax,vMax,wMax) \
+            if(worthThreading)
     for (int i = 1; i <= s.numCellsXm1; ++i)
         for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j)
             for (int k = 1; k <= cfg.numCellsZ; ++k) {

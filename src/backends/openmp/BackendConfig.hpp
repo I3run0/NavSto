@@ -8,7 +8,6 @@
 // =============================================================================
 
 #include "AccelScratch.hpp"
-#include "FirstTouchField.hpp"
 #include "GridField.hpp"
 #include "KernelTimers.hpp"
 #include "Rk4Workspace.hpp"
@@ -20,9 +19,10 @@
 /// Shown in the startup banner; see backendName().
 inline constexpr const char* kBackendName = "OpenMP";
 
-/// Storage for every 3-D field in SimState. FirstTouchField (this directory)
-/// is a contract-checked alternative, not selected: measured inside the
-/// run-to-run variance on this single-socket machine. Swapping is this line.
+/// Storage for every 3-D field in SimState. A NUMA first-touch variant used to
+/// live beside this file; its resize() value-initialised serially before the
+/// parallel loop ran, so every page was already faulted onto the master thread
+/// and the "no measurable difference" it recorded was measuring nothing.
 using Field = GridField<>;
 
 /// Host-synchronous kernels, so the driver's own wall clock is valid here.
@@ -38,7 +38,7 @@ struct Extras {
     std::vector<RowIndex> activeRows;
 
     /// Allocated by backendStartup(), and only for RK4Transient runs.
-    Rk4WorkspaceT<Field> rk4;
+    Rk4Workspace rk4;
 
     /// Called by SimState::allocateFields(), before initSimulation(). Only
     /// sizing happens here; activeRows needs geometry and is filled later.

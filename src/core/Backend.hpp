@@ -44,18 +44,10 @@ void rk4Combine(SimState& s);
 /// Re-apply the outlet and lateral velocity BCs after rk4Combine().
 void rk4ApplyFinalBCs(SimState& s);
 
-// ── Notes for a decomposed (multi-process) backend ──────────────────────────
+// ── For a decomposed (multi-process) backend ────────────────────────────────
 //
-//  SimConfig::numCells* are LOCAL, with globalNumCells*/origin* describing the
-//  full domain — so set those in backendStartup() BEFORE initSimulation() runs
-//  and geometry slices itself to this rank automatically.
-//
-//  Two things then still need doing, and both fit the contract above:
-//    - the residual/divergence reductions become collectives, inside
-//      computeMomentumResidual()/computeDivergence(); every rank ends up with
-//      the same value, which keeps the driver's convergence test in lockstep.
-//    - syncFieldsToHost() is where a gather belongs, if pieces are not wanted.
-//
-//  Not yet solved: the driver logs and writes VTK unconditionally, so every
-//  rank would do both. That needs either a rank-aware Logger or one more hook
-//  here.
+//  SimConfig::numCells* are LOCAL and globalNumCells*/origin* describe the full
+//  domain: set those in backendStartup() before initSimulation() and geometry
+//  slices itself to this rank. The residual/divergence reductions then become
+//  collectives, and syncFieldsToHost() is where a gather belongs. Still
+//  unsolved: the driver logs and writes VTK from every rank.

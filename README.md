@@ -32,10 +32,9 @@ cmake --build build --target validate_parallel   # thread-count equivalence
 cmake --build build --target validate_cuda       # GPU equivalence + determinism
 ```
 
-Requires **g++ ≥ 10** (or clang++ ≥ 12) with C++20 support (concepts — see
-`src/core/FieldStorage.hpp`).  No external libraries are needed. OpenMP and
-CUDA are both optional: configure succeeds without them and simply skips the
-corresponding targets.
+Requires **g++ ≥ 10** (or clang++ ≥ 12) with C++20 support. No external
+libraries are needed. OpenMP and CUDA are both optional: configure succeeds
+without them and simply skips the corresponding targets.
 
 ## Benchmarking
 
@@ -178,7 +177,7 @@ Edit `config_re100_expansion.cfg`.  All keys and allowed values:
 |-----|---------|-------------|
 | `numCellsX/Y/Z` | `48 24 24` | Grid resolution |
 | `reynoldsNumber` | `100.0` | Flow Reynolds number |
-| `geometryShape` | `AbruptExpansion` | One of: `AbruptExpansion`, `AbruptContraction`, `SharpCorner`, `RoundedCorner` |
+| `geometryShape` | `AbruptExpansion` | One of: `AbruptExpansion`, `AbruptContraction`, `SharpCorner`, `RoundedCorner`, `Straight` |
 | `geometryType` | `Axial` | `Axial` or `Curved` |
 | `lateralBC` | `Periodic` | `Periodic` or `SolidWall` |
 | `outletBC` | `ZeroFirstDeriv` | `ZeroFirstDeriv` or `ZeroSecondDeriv` |
@@ -220,15 +219,18 @@ Edit `config_re100_expansion.cfg`.  All keys and allowed values:
 ```
 NavSolver/
 ├── src/
+│   ├── app/                    # Driver.cpp — main() + the two time loops,
+│   │                           # one copy for every backend
 │   ├── core/                   # what a backend is built FROM: SimConfig,
-│   │                           # SimState, GridField, FieldStorage, Physics.hpp
-│   ├── solver/                 # shared physics + the program: Setup.cpp
-│   │                           # (geometry/ICs), Driver.cpp (main + time loops)
+│   │                           # SimState, GridField, Physics.hpp, Backend.hpp
+│   ├── solver/                 # shared physics: Setup.cpp (geometry/ICs),
+│   │                           # SchemeMath, Geometry, VelocityBCs, Viscosity
 │   ├── io/                     # ConfigParser, VtkExporter, Logger, KernelTimers
 │   └── backends/               # each owns its layout, working set and kernels
+│       ├── host/               #   Backend.hpp for serial + openmp
 │       ├── serial/             #   BackendConfig.hpp + Physics.cpp
 │       ├── openmp/             #   + red-black rows, per-thread scratch
-│       └── cuda/               #   + DeviceState, own Driver.cu
+│       └── cuda/               #   + DeviceState, CudaBackend.cu
 │
 ├── experiments/                # Self-contained experiments
 │   ├── configs/                # All .cfg files (Re=100, Re=500, scaling, etc.)
@@ -237,8 +239,9 @@ NavSolver/
 │
 ├── tests/                      # Unit tests (header-only harness, no deps),
 │                                # wired into `ctest`
-├── scripts/                    # benchmark.py, validate*.py — all wired as
-│                                # CMake targets; the validators also as ctest tests
+├── scripts/                    # harness.py (shared build/run/parse), then
+│                                # benchmark.py, validate*.py, roofline.py — all
+│                                # CMake targets; the validators also ctest tests
 ├── reference/                  # Legacy Pascal-derived C++ translation
 │                                # (navsto_dynamic.cpp) and validation data,
 │                                # kept for cross-checking the modernized solver

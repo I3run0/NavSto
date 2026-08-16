@@ -14,9 +14,10 @@
 //  Condition enumerations — replaces fragile string comparisons like "prd".
 // ---------------------------------------------------------------------------
 enum class GeometryType   { Axial, Curved };
-enum class GeometryShape  { AbruptExpansion, AbruptContraction, OpenCavity,
-                            GradualExpansion, UnilateralExpansion,
-                            GradualContraction, UnilateralContraction,
+/// Only shapes Setup.cpp actually builds. Five more were declared and parsed
+/// but fell through to the Straight case, so a run asking for them got a
+/// plausible result for a geometry it never used.
+enum class GeometryShape  { AbruptExpansion, AbruptContraction,
                             SharpCorner, RoundedCorner, Straight };
 enum class OutletBC       { ZeroFirstDeriv, ZeroSecondDeriv };
 enum class LateralBC      { Periodic, SolidWall };

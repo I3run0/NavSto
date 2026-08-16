@@ -19,13 +19,14 @@ TEST_CASE(GridField_AccessorsReadWrite) {
     REQUIRE(f.at(0, 0, 0) == 0.0);
 }
 
-TEST_CASE(GridField_BoundsCheckThrowsInDebug) {
-#ifndef NDEBUG
+// The test binaries build with -UNDEBUG (see CMakeLists.txt) so this runs in
+// every configuration. It used to be #ifndef NDEBUG'd and reported PASS in
+// Release while checking nothing.
+TEST_CASE(GridField_BoundsCheckThrows) {
     GridSize g{2, 2, 2};
     GridField<double> f(g);
     REQUIRE_THROWS(f.at(5, 0, 0));
     REQUIRE_THROWS(f.at(0, -1, 0));
-#endif
 }
 
 TEST_CASE(GridField_ResizeReplacesStorage) {
@@ -37,12 +38,3 @@ TEST_CASE(GridField_ResizeReplacesStorage) {
     REQUIRE(f(0, 0, 0) == 0.0);
 }
 
-TEST_CASE(CoeffVector_LogicalIndexOffset) {
-    CoeffVector c(3);
-    c[-1] = 1.0;
-    c[0] = 2.0;
-    c[1] = 3.0;
-    REQUIRE(c[-1] == 1.0);
-    REQUIRE(c[0] == 2.0);
-    REQUIRE(c[1] == 3.0);
-}

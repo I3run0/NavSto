@@ -25,14 +25,33 @@
 #include "Logger.hpp"
 
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <stdexcept>
 #include <algorithm>
 
 class ConfigParser {
 public:
+    /// Every key `parse()` understands. A key outside this set is a typo, and a
+    /// silently-ignored typo means benchmarking the default value while
+    /// believing otherwise -- so parse() rejects it rather than dropping it.
+    static const std::vector<std::string>& knownKeys() {
+        static const std::vector<std::string> keys = {
+            "numCellsX", "numCellsY", "numCellsZ", "baseUnit",
+            "domainLengthX", "domainLengthY", "domainLengthZ",
+            "reynoldsNumber", "hyperViscousRe", "hyperViscousStart",
+            "maxTimeSteps", "reportEveryN", "convergenceTol",
+            "numPressureIter", "sorOmega",
+            "outputDir", "runName",
+            "geometryShape", "geometryType", "lateralBC", "outletBC",
+            "initialProfile", "flowType",
+        };
+        return keys;
+    }
+
     /// Parse the file at `path` and fill `cfg`.  Throws on unknown keys or
     /// malformed values so configuration errors surface before any computation.
     static void parse(const std::filesystem::path& path, SimConfig& cfg) {
@@ -57,6 +76,12 @@ public:
 
             std::string key = trim(line.substr(0, eq));
             std::string val = trim(line.substr(eq + 1));
+
+            const auto& known = knownKeys();
+            if (std::find(known.begin(), known.end(), key) == known.end())
+                throw std::runtime_error("Config line " + std::to_string(lineNo)
+                                         + ": unknown key \"" + key + "\"");
+
             kv[key] = val;
         }
 
@@ -88,34 +113,46 @@ public:
         if (kv.count("flowType"))       cfg.flowType         = parseFlow(kv["flowType"]);
 
         // Cell sizes: dx = Cmp/II, dy = Alt/JJ, dz = Lrg/KK  (matches NavSto_dynamic.cpp)
-        if (cfg.cellSizeX == 0.0) cfg.cellSizeX = cfg.domainLengthX / cfg.numCellsX;
-        if (cfg.cellSizeY == 0.0) cfg.cellSizeY = cfg.domainLengthY / cfg.numCellsY;
-        if (cfg.cellSizeZ == 0.0) cfg.cellSizeZ = cfg.domainLengthZ / cfg.numCellsZ;
+        cfg.cellSizeX = cfg.domainLengthX / cfg.numCellsX;
+        cfg.cellSizeY = cfg.domainLengthY / cfg.numCellsY;
+        cfg.cellSizeZ = cfg.domainLengthZ / cfg.numCellsZ;
 
         LOG_INFO("Config loaded from ", path.string());
     }
 
-    /// Write current config back to a file (useful for checkpointing / provenance).
+    /// Write the config back out, as the run's provenance record.
+    ///
+    /// Must emit every key parse() reads: this file is what a run is replayed
+    /// from, and the enum keys it used to omit (geometryShape, flowType, the
+    /// BCs) are exactly the ones that change which simulation you get.
     static void write(const std::filesystem::path& path, const SimConfig& cfg) {
         std::ofstream f(path);
         if (!f) throw std::runtime_error("Cannot write config: " + path.string());
         f << "# NavSolver configuration snapshot\n";
-        f << "numCellsX        = " << cfg.numCellsX        << '\n';
-        f << "numCellsY        = " << cfg.numCellsY        << '\n';
-        f << "numCellsZ        = " << cfg.numCellsZ        << '\n';
-        f << "baseUnit         = " << cfg.baseUnit         << '\n';
-        f << "domainLengthX    = " << cfg.domainLengthX    << '\n';
-        f << "domainLengthY    = " << cfg.domainLengthY    << '\n';
-        f << "domainLengthZ    = " << cfg.domainLengthZ    << '\n';
-        f << "reynoldsNumber   = " << cfg.reynoldsNumber   << '\n';
-        f << "hyperViscousRe   = " << cfg.hyperViscousRe   << '\n';
-        f << "maxTimeSteps     = " << cfg.maxTimeSteps     << '\n';
-        f << "reportEveryN     = " << cfg.reportEveryN     << '\n';
-        f << "convergenceTol   = " << cfg.convergenceTol   << '\n';
-        f << "numPressureIter  = " << cfg.numPressureIter  << '\n';
-        f << "sorOmega         = " << cfg.sorOmega         << '\n';
-        f << "outputDir        = " << cfg.outputDir.string() << '\n';
-        f << "runName          = " << cfg.runName          << '\n';
+        f << std::setprecision(17);
+        f << "numCellsX         = " << cfg.numCellsX        << '\n';
+        f << "numCellsY         = " << cfg.numCellsY        << '\n';
+        f << "numCellsZ         = " << cfg.numCellsZ        << '\n';
+        f << "baseUnit          = " << cfg.baseUnit         << '\n';
+        f << "domainLengthX     = " << cfg.domainLengthX    << '\n';
+        f << "domainLengthY     = " << cfg.domainLengthY    << '\n';
+        f << "domainLengthZ     = " << cfg.domainLengthZ    << '\n';
+        f << "reynoldsNumber    = " << cfg.reynoldsNumber   << '\n';
+        f << "hyperViscousRe    = " << cfg.hyperViscousRe   << '\n';
+        f << "hyperViscousStart = " << cfg.hyperViscousStart << '\n';
+        f << "maxTimeSteps      = " << cfg.maxTimeSteps     << '\n';
+        f << "reportEveryN      = " << cfg.reportEveryN     << '\n';
+        f << "convergenceTol    = " << cfg.convergenceTol   << '\n';
+        f << "numPressureIter   = " << cfg.numPressureIter  << '\n';
+        f << "sorOmega          = " << cfg.sorOmega         << '\n';
+        f << "geometryShape     = " << toString(cfg.geometryShape)   << '\n';
+        f << "geometryType      = " << toString(cfg.geometryType)    << '\n';
+        f << "lateralBC         = " << toString(cfg.lateralCondition) << '\n';
+        f << "outletBC          = " << toString(cfg.outletCondition)  << '\n';
+        f << "initialProfile    = " << toString(cfg.initialProfile)   << '\n';
+        f << "flowType          = " << toString(cfg.flowType)         << '\n';
+        f << "outputDir         = " << cfg.outputDir.string() << '\n';
+        f << "runName           = " << cfg.runName          << '\n';
     }
 
 private:
@@ -138,14 +175,12 @@ private:
         if (it != kv.end()) out = std::stod(it->second);
     }
 
+    // Every enumerator GeometryShape declares is implemented in Setup.cpp; the
+    // five that were accepted here and silently fell through to Straight are
+    // gone from the enum rather than parsed into a lie.
     static GeometryShape parseShape(const std::string& v) {
         if (v == "AbruptExpansion")       return GeometryShape::AbruptExpansion;
         if (v == "AbruptContraction")     return GeometryShape::AbruptContraction;
-        if (v == "OpenCavity")            return GeometryShape::OpenCavity;
-        if (v == "GradualExpansion")      return GeometryShape::GradualExpansion;
-        if (v == "UnilateralExpansion")   return GeometryShape::UnilateralExpansion;
-        if (v == "GradualContraction")    return GeometryShape::GradualContraction;
-        if (v == "UnilateralContraction") return GeometryShape::UnilateralContraction;
         if (v == "SharpCorner")           return GeometryShape::SharpCorner;
         if (v == "RoundedCorner")         return GeometryShape::RoundedCorner;
         if (v == "Straight")              return GeometryShape::Straight;
@@ -175,5 +210,33 @@ private:
         if (v == "SteadyMarching") return FlowType::SteadyMarching;
         if (v == "RK4Transient")   return FlowType::RK4Transient;
         throw std::runtime_error("Unknown flowType: " + v);
+    }
+
+    // Inverses of the parse* functions above. Spellings must match exactly:
+    // write() then parse() has to round-trip to the same SimConfig.
+    static const char* toString(GeometryShape v) {
+        switch (v) {
+        case GeometryShape::AbruptExpansion:   return "AbruptExpansion";
+        case GeometryShape::AbruptContraction: return "AbruptContraction";
+        case GeometryShape::SharpCorner:       return "SharpCorner";
+        case GeometryShape::RoundedCorner:     return "RoundedCorner";
+        case GeometryShape::Straight:          return "Straight";
+        }
+        return "Straight";
+    }
+    static const char* toString(GeometryType v) {
+        return v == GeometryType::Axial ? "Axial" : "Curved";
+    }
+    static const char* toString(LateralBC v) {
+        return v == LateralBC::Periodic ? "Periodic" : "SolidWall";
+    }
+    static const char* toString(OutletBC v) {
+        return v == OutletBC::ZeroFirstDeriv ? "ZeroFirstDeriv" : "ZeroSecondDeriv";
+    }
+    static const char* toString(InitialProfile v) {
+        return v == InitialProfile::InletProfile ? "InletProfile" : "PotentialFlow";
+    }
+    static const char* toString(FlowType v) {
+        return v == FlowType::SteadyMarching ? "SteadyMarching" : "RK4Transient";
     }
 };

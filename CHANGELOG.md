@@ -9,7 +9,84 @@ under `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+- **VTK export destroyed the data it wrote.** The snapshot description line
+  applied `std::fixed << std::setprecision(6)` to the output stream; those are
+  sticky, so every field value after it was written `%.6f`. On a converged run
+  (`results/cam_re9600_t005944.vtk`) `MomentumResidual` had **one** distinct
+  non-zero value across 20,320 points — the literal `convergenceTol` — and 47%
+  of `Pressure` rounded to `0.000000`. The header is now formatted in its own
+  stream and field data is written at `setprecision(17)`, which round-trips an
+  IEEE double exactly. The convergence CSV had the same bug (`%.8f` fixed) and
+  the same fix; the Poiseuille check's residual now reads `2.7e-14` where it
+  used to read `0.00000000`, and `validate_parallel.py`'s 1e-12 determinism
+  comparison is no longer comparing quantised values.
+- **`AbruptContraction` read out of bounds.** It set `degreeIndex1 = -1`, and
+  `buildInitialPressure()` reads `press(degreeIndex1, 0, 0)`. Debug threw
+  `GridField out-of-range: (-1,0,0)`; Release read past the array and exited 0.
+  It is now `0`, which expresses the same intent (no Hagen-Poiseuille ramp)
+  the way `SharpCorner` and `RoundedCorner` already did.
+- **Five geometry shapes silently ran as `Straight`.** `OpenCavity`,
+  `GradualExpansion`, `UnilateralExpansion`, `GradualContraction` and
+  `UnilateralContraction` parsed fine and fell through `Setup.cpp`'s `default:`
+  case, so a run asking for them got a plausible-looking result for a geometry
+  it never used. They are gone from the enum and the parser, and the `default:`
+  is gone too, so `-Wswitch` now flags an unbuilt shape at compile time.
+- **The provenance config could not reproduce its run.** `ConfigParser::write()`
+  omitted `geometryShape`, `geometryType`, `lateralBC`, `outletBC`,
+  `initialProfile`, `flowType` and `hyperViscousStart` — every key that decides
+  which simulation you get. It now writes all of them and round-trips.
+- **Unknown config keys were silently ignored**, despite the docstring
+  promising otherwise; a typo like `reynoldsNumver` meant benchmarking the
+  default. `parse()` now rejects any key outside `knownKeys()`.
+- **The convergence CSV appended**, so re-running a `runName` concatenated
+  histories into one file with a resetting `step` column. It truncates now.
+- **`validate_parallel.py` still shelled out to the deleted `Makefile`** in its
+  build path — invisible under ctest, which passes `--skip-build`.
+- **The bounds-check unit test was compiled out in Release** and still reported
+  PASS. The test binaries now build with `-UNDEBUG` in every configuration.
+
+### Changed
+- **Every OpenMP kernel is now parallel.** `buildPressureSource`,
+  `updateVelocities`, `computeMomentumResidual`, `computeDivergence` and
+  `adaptTimeStep` were verbatim serial copies: 37% of per-step time on 12
+  threads, an Amdahl ceiling of 2.35x. Measured best-of-3 on 96x48x24 x 300
+  steps, peak speedup went from **1.50x (at 2 threads, degrading to 1.16x at
+  12) to 1.92x**, and 12-thread wall clock from 3.82s to 2.42s. The reductions
+  that feed control flow — `momentumResidMax` for the convergence test, the
+  velocity maxima for `dt` — are max reductions, so both stay bit-identical at
+  any thread count. `adaptTimeStep` only forks above ~10k iterations per
+  thread; below that a 12-thread fork/join cost more than the whole loop
+  (0.140ms serial vs 0.716ms on 12).
+- **All targets share one flag set.** `navsolver_omp` hardcoded `-O3 -DNDEBUG`,
+  so a Debug configure never bounds-checked or sanitised the one backend with
+  actual race risk.
+
 ### Removed
+- **Dead per-cell work inside timed kernels.** `maxVelocityChange` cost a
+  `sqrt` and a running max per cell in `updateVelocities` and was never read;
+  CUDA additionally did a full extra global store per cell into
+  `maxChangeScratch` and never reduced it. Also gone: the `i/j/kResidMax` and
+  `i/j/kDilMax` argmax indices, `midPlaneZ`, `hyperViscousDecay`, and the
+  `counter` member that should always have been a local.
+- **`FieldStorage.hpp` and `FirstTouchField.hpp`.** The concept had exactly one
+  live implementation, and its only alternative was broken: `FirstTouchField`
+  claimed to allocate without value-initialising, but `data_.resize(n)` did
+  that serially on the master thread, faulting every page onto one node before
+  the parallel loop ran — so the "no measurable difference" recorded in
+  `openmp/BackendConfig.hpp` was measuring nothing. `Rk4Workspace` is no longer
+  templated, and `CoeffVector` (used only by its own unit test) is gone.
+- **Duplicated formulas.** `computeExponentialWeights`, `computeQsi` and
+  `effectiveInvRe` existed once per host backend plus a hand-synced `__device__
+  __host__` copy in `DeviceMath.cuh`; they now live once in
+  `src/solver/SchemeMath.hpp`, annotated `__host__ __device__`. The
+  active-span j-range logic was open-coded in eleven places and is now
+  `activeJRange`/`mirrorJRange` in `Geometry.hpp`. `applyVelocityBCs` moved to
+  `src/solver/VelocityBCs.hpp`. The serial and OpenMP hot kernels stay separate.
+- **Duplicated Python plumbing.** `build()` lived in five scripts, the VTK
+  readers and field comparison in two or three each; all now in
+  `scripts/harness.py`.
+
 - **The hand-rolled `Makefile`.** Two build systems had to be kept in step by
   hand and had already diverged — CUDA was CMake-only (mixed C++/CUDA linking
   is not worth reimplementing), so `make` could not build all the targets, and

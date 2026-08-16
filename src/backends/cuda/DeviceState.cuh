@@ -2,17 +2,12 @@
 // =============================================================================
 //  DeviceState.cuh  —  Device-resident mirror of SimState for the CUDA port.
 //
-//  Deliberately a SEPARATE struct from src/core/SimState.hpp rather than
-//  adding device pointers directly to it: keeps the CPU serial/OpenMP builds
-//  (src/core/, src/backends/serial/, src/backends/openmp/) completely untouched, and matches
-//  this phase's "CMake-only, additive" build-system approach (see
-//  docs/cuda-port.md). Built once from a host SimState right after
-//  initSimulation() runs (geometry is fixed for the rest of the run, same
-//  assumption Geometry.hpp already relies on); freed at process exit.
+//  A separate struct rather than device pointers on SimState, so the CPU
+//  builds stay untouched. Built once from a host SimState after
+//  initSimulation() (geometry is fixed from then on), freed at exit.
 //
-//  Field layout matches GridField<T>'s flat (i*sJ+j)*sK+k indexing exactly
-//  (see GridField.hpp), so uploading/downloading a whole field is a single
-//  contiguous cudaMemcpy against s.velX.data().data() etc. — no repacking.
+//  The layout matches GridField's flat (i*sJ+j)*sK+k indexing, so a whole
+//  field uploads or downloads as one contiguous cudaMemcpy — no repacking.
 // =============================================================================
 
 #include "SimState.hpp"
@@ -32,17 +27,10 @@
         }                                                                       \
     } while (0)
 
-/// One (i,j,k) cell reference on the device. The host side no longer
-/// stores a per-cell red/black list (Geometry.hpp's
-/// v2 stores s.activeRows, one (i,j) ROW per active row, used for both
-/// colors via a strided k-loop — see that file's comment) since a
-/// gather-per-cell was found to be latency-bound on the CPU. CUDA still
-/// wants one thread per CELL, not per row (a GPU wants high thread counts
-/// to hide latency; collapsing to one thread per row like the CPU would
-/// cost ~numCellsZ/2x fewer threads, hurting occupancy) — so
-/// buildDeviceState() expands s.activeRows into per-cell red/black lists
-/// on the host before uploading, replicating the exact k-parity/stride
-/// formula src/backends/openmp/Physics.cpp's updateColor() uses.
+/// One (i,j,k) cell reference on the device. The CPU iterates rows and strides
+/// k, but a GPU wants one thread per CELL for occupancy, so buildDeviceState()
+/// expands Geometry.hpp's row list into per-cell red/black lists on the host
+/// using the same k-parity formula updateColor() applies.
 struct DeviceCellIndex { int i, j, k; };
 
 // ---------------------------------------------------------------------------

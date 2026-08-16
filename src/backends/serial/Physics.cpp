@@ -12,97 +12,18 @@
 // =============================================================================
 
 #include "Physics.hpp"
+#include "Geometry.hpp"
 #include "Logger.hpp"
+#include "VelocityBCs.hpp"
 #include "ViscosityModel.hpp"
 
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
 
-// ─── Internal helpers ────────────────────────────────────────────────────────
-
-namespace {
-
 // ---------------------------------------------------------------------------
-//  UNIFAES weight π(Pe):  blends upwind and central differencing so that the
-//  scheme is exact for 1-D steady advection-diffusion at any Péclet number.
+//  computeAccelerations — UNIFAES advection + viscous terms
 // ---------------------------------------------------------------------------
-void computeExponentialWeights(double localRe, double DPe,
-                               double& pip,
-                               double& coeffEast, double& coeffWest)
-{
-    if (std::abs(DPe) < 0.1) {
-        // Polynomial approximation — numerically stable near Pe = 0
-        pip = 1.0 / ((((0.05*DPe + 0.25)*DPe + 1.0)*DPe/6.0 + 0.5)*DPe + 1.0);
-    } else if (std::abs(DPe) <= 200.0) {
-        pip = DPe / (std::exp(DPe) - 1.0);  // exact Bernstein-Crank formula
-    } else if (DPe > 200.0) {
-        pip = 0.0;    // advection strongly left-to-right; east weight vanishes
-    } else {
-        pip = -DPe;   // advection strongly right-to-left
-    }
-
-    const double pim = DPe + pip;
-    coeffEast = pip / localRe;
-    coeffWest = pim / localRe;
-}
-
-// ---------------------------------------------------------------------------
-//  UNIFAES cross-term blending weight ξ.
-// ---------------------------------------------------------------------------
-double computeQsi(double DPe, double pip, double xeOverDx)
-{
-    if (std::abs(DPe) < 0.01)
-        return DPe * (1.0 - DPe * DPe / 60.0) / 12.0 + xeOverDx - 0.5;
-    return (pip - 1.0) / DPe + xeOverDx;
-}
-
-// ---------------------------------------------------------------------------
-//  Apply outlet and periodic boundary conditions to velocity.
-// ---------------------------------------------------------------------------
-void applyVelocityBCs(SimState& s)
-{
-    const int KKfim = (s.cfg.lateralCondition == LateralBC::SolidWall)
-                    ? s.numCellsZm1 : s.cfg.numCellsZ;
-
-    if (s.cfg.outletCondition == OutletBC::ZeroFirstDeriv) {
-        for (int j = s.jLow[s.cfg.numCellsX]+1; j <= s.jHigh[s.cfg.numCellsX]-1; ++j)
-            for (int k = 0; k <= KKfim; ++k) {
-                s.velX(s.cfg.numCellsX, j, k) = s.velX(s.numCellsXm1, j, k);
-                s.velY(s.cfg.numCellsX, j, k) = s.velY(s.numCellsXm1, j, k);
-                s.velZ(s.cfg.numCellsX, j, k) = s.velZ(s.numCellsXm1, j, k);
-            }
-    }
-    if (s.cfg.outletCondition == OutletBC::ZeroSecondDeriv) {
-        for (int j = s.jLow[s.cfg.numCellsX]+1; j <= s.jHigh[s.cfg.numCellsX]-1; ++j)
-            for (int k = 0; k <= KKfim; ++k) {
-                s.velX(s.cfg.numCellsX, j, k) = 2.0*s.velX(s.numCellsXm1, j, k) - s.velX(s.cfg.numCellsX-2, j, k);
-                s.velY(s.cfg.numCellsX, j, k) = 2.0*s.velY(s.numCellsXm1, j, k) - s.velY(s.cfg.numCellsX-2, j, k);
-                s.velZ(s.cfg.numCellsX, j, k) = 2.0*s.velZ(s.numCellsXm1, j, k) - s.velZ(s.cfg.numCellsX-2, j, k);
-            }
-    }
-    if (s.cfg.lateralCondition == LateralBC::Periodic) {
-        for (int i = 1; i <= s.numCellsXm1; ++i)
-            for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
-                s.velX(i, j, 0) = s.velX(i, j, s.cfg.numCellsZ);
-                s.velY(i, j, 0) = s.velY(i, j, s.cfg.numCellsZ);
-                s.velZ(i, j, 0) = s.velZ(i, j, s.cfg.numCellsZ);
-            }
-    }
-}
-
-} // anonymous namespace
-
-// ════════════════════════════════════════════════════════════════════════════
-//  PUBLIC API
-// ════════════════════════════════════════════════════════════════════════════
-
-// ---------------------------------------------------------------------------
-//  computeAccelerations — UNIFAES advective + viscous accelerations
-// ---------------------------------------------------------------------------
-// =============================================================================
-//  computeAccelerations  —  UNIFAES advection + viscous terms (exact as CoCOEF)
-// =============================================================================
 void computeAccelerations(SimState& s)
 {
     const auto& cfg = s.cfg;
@@ -387,9 +308,8 @@ void buildPressureSource(SimState& s)
     const double invDt  = 1.0  / s.timeStepSize;
 
     for (int i = 1; i <= cfg.numCellsX; ++i) {
-        const int im  = i - 1;
-        const int jS  = (i != s.degreeIndex2) ? s.jLow[i]+1  : s.jLow[im]+1;
-        const int jN  = (i != s.degreeIndex2) ? s.jHigh[i]   : s.jHigh[im];
+        const int im = i - 1;
+        int jS, jN; activeJRange(s, i, jS, jN);
 
         for (int j = jS; j <= jN; ++j) {
             const int jm = j - 1;
@@ -444,12 +364,7 @@ void solvePressurePoisson(SimState& s)
     for (int sweep = 0; sweep < cfg.numPressureIter; ++sweep) {
         for (int i = 1; i <= cfg.numCellsX; ++i) {
             const int im = i-1, ip = i+1;
-            int jLoopS, jLoopN;
-            if      (s.jLow[im]  >= s.jLow[i])  jLoopS = s.jLow[i]+1;
-            else                                  jLoopS = s.jLow[i];
-            if      (s.jHigh[im] <= s.jHigh[i]) jLoopN = s.jHigh[i];
-            else                                  jLoopN = s.jHigh[i]+1;
-            if (i == s.degreeIndex2) { jLoopS = s.jLow[im]+1; jLoopN = s.jHigh[im]; }
+            int jLoopS, jLoopN; mirrorJRange(s, i, jLoopS, jLoopN);
 
             for (int k = 1; k <= cfg.numCellsZ; ++k) {
                 int km = k-1, kp = k+1;
@@ -505,7 +420,6 @@ void updateVelocities(SimState& s)
     const double qInvDz = 0.25 / cfg.cellSizeZ;
     const double dt_eff = s.useHalfStep ? 0.5 * s.timeStepSize : s.timeStepSize;
     const int KKfim = (cfg.lateralCondition == LateralBC::SolidWall) ? s.numCellsZm1 : cfg.numCellsZ;
-    s.maxVelocityChange = 0.0;
 
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int ip = i + 1;
@@ -528,9 +442,6 @@ void updateVelocities(SimState& s)
                 s.velX(i,j,k) += du * dt_eff;
                 s.velY(i,j,k) += dv * dt_eff;
                 s.velZ(i,j,k) += dw * dt_eff;
-
-                const double mag = std::sqrt(du*du + dv*dv + dw*dw);
-                s.maxVelocityChange = std::max(s.maxVelocityChange, mag);
             }
             if (cfg.lateralCondition == LateralBC::Periodic) {
                 s.velX(i,j,0) = s.velX(i,j,cfg.numCellsZ);
@@ -556,7 +467,7 @@ void computeMomentumResidual(SimState& s)
 
     s.momentumResidMax = 0.0;
     s.momentumResidRMS = 0.0;
-    s.counter          = 0;
+    long long count = 0;
 
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int ip = i + 1;
@@ -582,17 +493,14 @@ void computeMomentumResidual(SimState& s)
                 const double resNorm  = std::sqrt(resSq);
                 s.scratchField(i,j,k) = resNorm;
 
-                if (resNorm > s.momentumResidMax) {
-                    s.momentumResidMax = resNorm;
-                    s.iResidMax = i; s.jResidMax = j; s.kResidMax = k;
-                }
+                s.momentumResidMax = std::max(s.momentumResidMax, resNorm);
                 s.momentumResidRMS += resSq;
-                ++s.counter;
+                ++count;
             }
         }
     }
-    if (s.counter > 0)
-        s.momentumResidRMS = std::sqrt(s.momentumResidRMS / s.counter);
+    if (count > 0)
+        s.momentumResidRMS = std::sqrt(s.momentumResidRMS / static_cast<double>(count));
 }
 
 // ---------------------------------------------------------------------------
@@ -611,8 +519,7 @@ void computeDivergence(SimState& s)
 
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         const int im = i - 1;
-        const int jS = (i != s.degreeIndex2) ? s.jLow[i]+1  : s.jLow[im]+1;
-        const int jN = (i != s.degreeIndex2) ? s.jHigh[i]   : s.jHigh[im];
+        int jS, jN; activeJRange(s, i, jS, jN);
 
         for (int j = jS; j <= jN; ++j) {
             const int jm = j - 1;
@@ -629,10 +536,7 @@ void computeDivergence(SimState& s)
 
                 s.intDivergence    += div;
                 s.intAbsDivergence += std::abs(div);
-                if (std::abs(div) > s.dilatationMax) {
-                    s.dilatationMax = std::abs(div);
-                    s.iDilMax = i; s.jDilMax = j; s.kDilMax = k;
-                }
+                s.dilatationMax     = std::max(s.dilatationMax, std::abs(div));
             }
         }
     }
