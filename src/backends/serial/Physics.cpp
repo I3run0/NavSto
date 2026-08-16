@@ -195,7 +195,12 @@ void computeAccelerations(SimState& s)
         const double invRe = effectiveInvRe(s, i);
         const double localRe = 1.0 / invRe;
 
-        for (int j = jStart; j <= jEnd-1; ++j) {
+        // Passes 1-3 fused, exactly as the X sweep above and for the same
+        // reason: all three read velX/velY/velZ at j-1, j and j+1, and the only
+        // cross-pass dependency (pass 2 needs ppin[j+1] from pass 1 at this j,
+        // and ppis[j+1] from pass 1 at j-1) resolves inside one iteration.
+        {
+            const int j = jStart;
             for (int k = 1; k <= KKfim; ++k) {
                 const double vFace = 0.5 * (s.velY(i, j+1, k) + s.velY(i, j, k));
                 const double DPe = localRe * vFace * cfg.cellSizeY;
@@ -208,25 +213,37 @@ void computeAccelerations(SimState& s)
         }
         for (int j = jStart+1; j <= jEnd-1; ++j) {
             for (int k = 1; k <= KKfim; ++k) {
+                // One load of each field per (j,k), shared by all three passes.
+                const double vxm = s.velX(i,j-1,k), vx0 = s.velX(i,j,k), vxp = s.velX(i,j+1,k);
+                const double vym = s.velY(i,j-1,k), vy0 = s.velY(i,j,k), vyp = s.velY(i,j+1,k);
+                const double vzm = s.velZ(i,j-1,k), vz0 = s.velZ(i,j,k), vzp = s.velZ(i,j+1,k);
+
+                // Pass 1: face coefficients (between j and j+1)
+                const double vFace = 0.5 * (vyp + vy0);
+                const double DPeFace = localRe * vFace * cfg.cellSizeY;
+                double pipF, cinF, cisF;
+                computeExponentialWeights(localRe, DPeFace, pipF, cinF, cisF);
+                VM2(ppinJK, j+1, k) = cinF;
+                VM2(ppisJK, j+2, k) = cisF;
+                VM2(qsinJK, j+1, k) = computeQsi(DPeFace, pipF, 0.5);
+
+                // Pass 2: diffusive part of Au, Av, Aw
                 const double coeff = invDy2;
-                s.accelX(i, j, k) += (VM2(ppinJK,j+1,k)*(s.velX(i,j+1,k)-s.velX(i,j,k))
-                                     + VM2(ppisJK,j+1,k)*(s.velX(i,j-1,k)-s.velX(i,j,k))) * coeff;
-                s.accelY(i, j, k) += (VM2(ppinJK,j+1,k)*(s.velY(i,j+1,k)-s.velY(i,j,k))
-                                     + VM2(ppisJK,j+1,k)*(s.velY(i,j-1,k)-s.velY(i,j,k))) * coeff;
-                s.accelZ(i, j, k) += (VM2(ppinJK,j+1,k)*(s.velZ(i,j+1,k)-s.velZ(i,j,k))
-                                     + VM2(ppisJK,j+1,k)*(s.velZ(i,j-1,k)-s.velZ(i,j,k))) * coeff;
-            }
-        }
-        for (int j = jStart+1; j <= jEnd-1; ++j) {
-            for (int k = 1; k <= KKfim; ++k) {
-                const double vCell = s.velY(i, j, k);
-                const double DPe = localRe * vCell * cfg.cellSizeY;
-                double pip, cin, cis;
-                computeExponentialWeights(localRe, DPe, pip, cin, cis);
-                cin *= invDy2;  cis *= invDy2;
-                VM2(KuJK, j+1, k) = cin*(s.velX(i,j,k)-s.velX(i,j+1,k)) + cis*(s.velX(i,j,k)-s.velX(i,j-1,k));
-                VM2(KvJK, j+1, k) = cin*(s.velY(i,j,k)-s.velY(i,j+1,k)) + cis*(s.velY(i,j,k)-s.velY(i,j-1,k));
-                VM2(KwJK, j+1, k) = cin*(s.velZ(i,j,k)-s.velZ(i,j+1,k)) + cis*(s.velZ(i,j,k)-s.velZ(i,j-1,k));
+                const double ppin = VM2(ppinJK,j+1,k);   // written just above
+                const double ppis = VM2(ppisJK,j+1,k);   // written at j-1
+                s.accelX(i, j, k) += (ppin*(vxp-vx0) + ppis*(vxm-vx0)) * coeff;
+                s.accelY(i, j, k) += (ppin*(vyp-vy0) + ppis*(vym-vy0)) * coeff;
+                s.accelZ(i, j, k) += (ppin*(vzp-vz0) + ppis*(vzm-vz0)) * coeff;
+
+                // Pass 3: cross-term correction (K * qsi)
+                const double vCell = vy0;
+                const double DPeCell = localRe * vCell * cfg.cellSizeY;
+                double pipC, cinC, cisC;
+                computeExponentialWeights(localRe, DPeCell, pipC, cinC, cisC);
+                cinC *= invDy2;  cisC *= invDy2;
+                VM2(KuJK, j+1, k) = cinC*(vx0-vxp) + cisC*(vx0-vxm);
+                VM2(KvJK, j+1, k) = cinC*(vy0-vyp) + cisC*(vy0-vym);
+                VM2(KwJK, j+1, k) = cinC*(vz0-vzp) + cisC*(vz0-vzm);
             }
         }
         for (int k = 1; k <= KKfim; ++k) {
