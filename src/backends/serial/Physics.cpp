@@ -43,9 +43,8 @@ void computeAccelerations(SimState& s)
     // slot maxDim+2. Owned by SimState's backend Extras and reused across calls
     // instead of being allocated fresh every call — see AccelScratch.hpp for why
     // that's safe without re-zeroing.
-    auto& ppin = s.ext.accel.ppin; auto& ppis = s.ext.accel.ppis;
     auto& ppiu = s.ext.accel.ppiu; auto& ppid = s.ext.accel.ppid;
-    auto& qsin = s.ext.accel.qsin; auto& qsiu = s.ext.accel.qsiu;
+    auto& qsiu = s.ext.accel.qsiu;
     auto& Ku = s.ext.accel.Ku; auto& Kv = s.ext.accel.Kv; auto& Kw = s.ext.accel.Kw;
 
     // X-sweep-only 2-D (i,k) scratch — see AccelScratch.hpp field comments
@@ -152,56 +151,77 @@ void computeAccelerations(SimState& s)
     }
 
     // ---------- Direction Y ----------
+    // Same restructuring the X-sweep already had, for the same reason: j
+    // carries the pass-to-pass recurrence and cannot move, but nothing here
+    // references k+-1, so k becomes the innermost unit-stride loop and the
+    // scratch widens to (j, k). The 2-D buffers are the X-sweep's, reused --
+    // that sweep is complete and its scratch dead by this point, and both
+    // dimensions are sized off maxDim, so no extra allocation is needed.
+    auto& ppinJK = s.ext.accel.ppieXK; auto& ppisJK = s.ext.accel.ppiwXK;
+    auto& qsinJK = s.ext.accel.qsieXK;
+    auto& KuJK = s.ext.accel.KuXK; auto& KvJK = s.ext.accel.KvXK; auto& KwJK = s.ext.accel.KwXK;
+
     const double invDy2 = 1.0 / (cfg.cellSizeY * cfg.cellSizeY);
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int jStart = s.jLow[i];
         const int jEnd   = s.jHigh[i];
         const double invRe = effectiveInvRe(s, i);
         const double localRe = 1.0 / invRe;
-        for (int k = 1; k <= KKfim; ++k) {
-            for (int j = jStart; j <= jEnd-1; ++j) {
+
+        for (int j = jStart; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
                 const double vFace = 0.5 * (s.velY(i, j+1, k) + s.velY(i, j, k));
                 const double DPe = localRe * vFace * cfg.cellSizeY;
                 double pip, cin, cis;
                 computeExponentialWeights(localRe, DPe, pip, cin, cis);
-                VM(ppin, j+1) = cin;
-                VM(ppis, j+2) = cis;
-                VM(qsin, j+1) = computeQsi(DPe, pip, 0.5);
+                VM2(ppinJK, j+1, k) = cin;
+                VM2(ppisJK, j+2, k) = cis;
+                VM2(qsinJK, j+1, k) = computeQsi(DPe, pip, 0.5);
             }
-            for (int j = jStart+1; j <= jEnd-1; ++j) {
+        }
+        for (int j = jStart+1; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
                 const double coeff = invDy2;
-                s.accelX(i, j, k) += (VM(ppin,j+1)*(s.velX(i,j+1,k)-s.velX(i,j,k))
-                                     + VM(ppis,j+1)*(s.velX(i,j-1,k)-s.velX(i,j,k))) * coeff;
-                s.accelY(i, j, k) += (VM(ppin,j+1)*(s.velY(i,j+1,k)-s.velY(i,j,k))
-                                     + VM(ppis,j+1)*(s.velY(i,j-1,k)-s.velY(i,j,k))) * coeff;
-                s.accelZ(i, j, k) += (VM(ppin,j+1)*(s.velZ(i,j+1,k)-s.velZ(i,j,k))
-                                     + VM(ppis,j+1)*(s.velZ(i,j-1,k)-s.velZ(i,j,k))) * coeff;
+                s.accelX(i, j, k) += (VM2(ppinJK,j+1,k)*(s.velX(i,j+1,k)-s.velX(i,j,k))
+                                     + VM2(ppisJK,j+1,k)*(s.velX(i,j-1,k)-s.velX(i,j,k))) * coeff;
+                s.accelY(i, j, k) += (VM2(ppinJK,j+1,k)*(s.velY(i,j+1,k)-s.velY(i,j,k))
+                                     + VM2(ppisJK,j+1,k)*(s.velY(i,j-1,k)-s.velY(i,j,k))) * coeff;
+                s.accelZ(i, j, k) += (VM2(ppinJK,j+1,k)*(s.velZ(i,j+1,k)-s.velZ(i,j,k))
+                                     + VM2(ppisJK,j+1,k)*(s.velZ(i,j-1,k)-s.velZ(i,j,k))) * coeff;
             }
-            for (int j = jStart+1; j <= jEnd-1; ++j) {
+        }
+        for (int j = jStart+1; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
                 const double vCell = s.velY(i, j, k);
                 const double DPe = localRe * vCell * cfg.cellSizeY;
                 double pip, cin, cis;
                 computeExponentialWeights(localRe, DPe, pip, cin, cis);
                 cin *= invDy2;  cis *= invDy2;
-                VM(Ku, j+1) = cin*(s.velX(i,j,k)-s.velX(i,j+1,k)) + cis*(s.velX(i,j,k)-s.velX(i,j-1,k));
-                VM(Kv, j+1) = cin*(s.velY(i,j,k)-s.velY(i,j+1,k)) + cis*(s.velY(i,j,k)-s.velY(i,j-1,k));
-                VM(Kw, j+1) = cin*(s.velZ(i,j,k)-s.velZ(i,j+1,k)) + cis*(s.velZ(i,j,k)-s.velZ(i,j-1,k));
+                VM2(KuJK, j+1, k) = cin*(s.velX(i,j,k)-s.velX(i,j+1,k)) + cis*(s.velX(i,j,k)-s.velX(i,j-1,k));
+                VM2(KvJK, j+1, k) = cin*(s.velY(i,j,k)-s.velY(i,j+1,k)) + cis*(s.velY(i,j,k)-s.velY(i,j-1,k));
+                VM2(KwJK, j+1, k) = cin*(s.velZ(i,j,k)-s.velZ(i,j+1,k)) + cis*(s.velZ(i,j,k)-s.velZ(i,j-1,k));
             }
-            VM(Ku, jStart+1) = 2.0*VM(Ku, jStart+2) - VM(Ku, jStart+3);
-            VM(Kv, jStart+1) = 2.0*VM(Kv, jStart+2) - VM(Kv, jStart+3);
-            VM(Kw, jStart+1) = 2.0*VM(Kw, jStart+2) - VM(Kw, jStart+3);
-            VM(Ku, jEnd+1)   = 2.0*VM(Ku, jEnd)   - VM(Ku, jEnd-1);
-            VM(Kv, jEnd+1)   = 2.0*VM(Kv, jEnd)   - VM(Kv, jEnd-1);
-            VM(Kw, jEnd+1)   = 2.0*VM(Kw, jEnd)   - VM(Kw, jEnd-1);
-            for (int j = jStart; j <= jEnd-1; ++j) {
-                VM(Ku, j+1) = 0.5*(VM(Ku, j+1) + VM(Ku, j+2));
-                VM(Kv, j+1) = 0.5*(VM(Kv, j+1) + VM(Kv, j+2));
-                VM(Kw, j+1) = 0.5*(VM(Kw, j+1) + VM(Kw, j+2));
+        }
+        for (int k = 1; k <= KKfim; ++k) {
+            VM2(KuJK, jStart+1, k) = 2.0*VM2(KuJK, jStart+2, k) - VM2(KuJK, jStart+3, k);
+            VM2(KvJK, jStart+1, k) = 2.0*VM2(KvJK, jStart+2, k) - VM2(KvJK, jStart+3, k);
+            VM2(KwJK, jStart+1, k) = 2.0*VM2(KwJK, jStart+2, k) - VM2(KwJK, jStart+3, k);
+            VM2(KuJK, jEnd+1, k)   = 2.0*VM2(KuJK, jEnd, k)   - VM2(KuJK, jEnd-1, k);
+            VM2(KvJK, jEnd+1, k)   = 2.0*VM2(KvJK, jEnd, k)   - VM2(KvJK, jEnd-1, k);
+            VM2(KwJK, jEnd+1, k)   = 2.0*VM2(KwJK, jEnd, k)   - VM2(KwJK, jEnd-1, k);
+        }
+        for (int j = jStart; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
+                VM2(KuJK, j+1, k) = 0.5*(VM2(KuJK, j+1, k) + VM2(KuJK, j+2, k));
+                VM2(KvJK, j+1, k) = 0.5*(VM2(KvJK, j+1, k) + VM2(KvJK, j+2, k));
+                VM2(KwJK, j+1, k) = 0.5*(VM2(KwJK, j+1, k) + VM2(KwJK, j+2, k));
             }
-            for (int j = jStart+1; j <= jEnd-1; ++j) {
-                s.accelX(i, j, k) -= (VM(Ku,j+1)*VM(qsin,j+1) - VM(Ku,j)*VM(qsin,j));
-                s.accelY(i, j, k) -= (VM(Kv,j+1)*VM(qsin,j+1) - VM(Kv,j)*VM(qsin,j));
-                s.accelZ(i, j, k) -= (VM(Kw,j+1)*VM(qsin,j+1) - VM(Kw,j)*VM(qsin,j));
+        }
+        for (int j = jStart+1; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
+                s.accelX(i, j, k) -= (VM2(KuJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KuJK,j,k)*VM2(qsinJK,j,k));
+                s.accelY(i, j, k) -= (VM2(KvJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KvJK,j,k)*VM2(qsinJK,j,k));
+                s.accelZ(i, j, k) -= (VM2(KwJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KwJK,j,k)*VM2(qsinJK,j,k));
             }
         }
     }
