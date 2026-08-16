@@ -135,33 +135,67 @@ Snapshot snapshotFor(const std::string& kernel) {
     return snap;
 }
 
-/// Max |laplacian(p) - S| over the interior, i.e. how far the pressure solve
-/// actually got. The kernel runs a fixed sweep count and never reports this,
-/// so "is 5 sweeps enough" was previously unanswerable without a trajectory
-/// experiment, which confounds solver accuracy with a different simulation.
-std::pair<double,double> poissonResidual(const SimState& s) {
+/// Where the pressure solve's residual actually lives, and whether the problem
+/// it is being asked to solve is even solvable.
+///
+/// Two things are being separated. (1) The discrete Neumann compatibility
+/// condition: with homogeneous Neumann all round, sum(S) over the active
+/// domain must vanish, or no solution exists and any solver stalls at a
+/// least-squares floor spread over the whole domain. (2) The solver's operator
+/// is not the plain Laplacian -- it subtracts extra source at corner cells,
+/// pins a reference node, and mirrors ghosts inline -- so residual measured
+/// against a plain Laplacian is expected at exactly those cells and nowhere
+/// else. Interior-only RMS tells the two apart.
+struct ResidualReport {
+    double rmsAll = 0, rmsInterior = 0, rmsBoundary = 0, linf = 0;
+    double sumS = 0, sumAbsS = 0;
+    long long nAll = 0, nInterior = 0, nBoundary = 0;
+    int linfI = 0, linfJ = 0, linfK = 0;
+};
+
+ResidualReport poissonReport(const SimState& s) {
     const auto& cfg = s.cfg;
     const double cX = 1.0 / s.cellSizeXsq, cY = 1.0 / s.cellSizeYsq, cZ = 1.0 / s.cellSizeZsq;
-    double worst = 0.0, sumSq = 0.0; long long n = 0;
+    const bool solid = (cfg.lateralCondition == LateralBC::SolidWall);
+    const int iRef = cfg.numCellsX;
+    const int jRef = (s.jHigh[cfg.numCellsX] + s.jLow[cfg.numCellsX]) / 2;
+    const int kRef = (cfg.numCellsZ + 1) / 2;
+
+    ResidualReport r;
+    double sqAll = 0, sqInt = 0, sqBnd = 0;
+
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         int jS, jN; activeJRange(s, i, jS, jN);
         for (int j = jS; j <= jN; ++j)
             for (int k = 1; k <= cfg.numCellsZ; ++k) {
                 int km = k-1, kp = k+1;
-                if (cfg.lateralCondition != LateralBC::SolidWall) {
-                    if (k == 1) km = cfg.numCellsZ;
-                    if (k == cfg.numCellsZ) kp = 1;
-                }
+                if (!solid) { if (k == 1) km = cfg.numCellsZ; if (k == cfg.numCellsZ) kp = 1; }
                 const double lap =
                       cX*(s.press(i+1,j,k) - 2.0*s.press(i,j,k) + s.press(i-1,j,k))
                     + cY*(s.press(i,j+1,k) - 2.0*s.press(i,j,k) + s.press(i,j-1,k))
                     + cZ*(s.press(i,j,kp)  - 2.0*s.press(i,j,k) + s.press(i,j,km));
-                const double r = lap - s.pressureSource(i,j,k);
-                worst = std::max(worst, std::abs(r));
-                sumSq += r*r; ++n;
+                const double res = lap - s.pressureSource(i,j,k);
+
+                r.sumS += s.pressureSource(i,j,k);
+                r.sumAbsS += std::abs(s.pressureSource(i,j,k));
+                sqAll += res*res; ++r.nAll;
+                if (std::abs(res) > r.linf) { r.linf = std::abs(res); r.linfI=i; r.linfJ=j; r.linfK=k; }
+
+                // A cell the solver treats specially: domain edge in i or j,
+                // the pinned reference node, or a SolidWall k face.
+                const bool special =
+                       (i == 1 || i == cfg.numCellsX)
+                    || (j == jS || j == jN)
+                    || (i == iRef && j == jRef && k == kRef)
+                    || (solid && (k == 1 || k == cfg.numCellsZ));
+                if (special) { sqBnd += res*res; ++r.nBoundary; }
+                else         { sqInt += res*res; ++r.nInterior; }
             }
     }
-    return {worst, n ? std::sqrt(sumSq / static_cast<double>(n)) : 0.0};
+    r.rmsAll      = r.nAll      ? std::sqrt(sqAll/(double)r.nAll)           : 0;
+    r.rmsInterior = r.nInterior ? std::sqrt(sqInt/(double)r.nInterior)      : 0;
+    r.rmsBoundary = r.nBoundary ? std::sqrt(sqBnd/(double)r.nBoundary)      : 0;
+    return r;
 }
 
 void callKernel(const std::string& k, SimState& s) {
@@ -236,16 +270,20 @@ int main(int argc, char* argv[])
     if (o.kernel == "poisson-report") {
         // How much room is left in the pressure solve: residual and cost as a
         // function of sweep count, on ONE fixed source.
-        std::cout << "sweeps,residual_inf,residual_rms,solve_ms\n" << std::scientific << std::setprecision(6);
-        for (int n : {1, 2, 5, 10, 20, 50, 100, 200, 500}) {
+        std::cout << "sweeps,rms_all,rms_interior,rms_boundary,linf,linf_at,"
+                     "sumS,sumAbsS,compat_ratio,n_interior,n_boundary\n"
+                  << std::scientific << std::setprecision(6);
+        for (int n : {1, 5, 20, 100, 500}) {
             Options oo = o; oo.numPressureIter = n;
             SimState s; buildState(s, oo);
-            const auto t0 = Clock::now();
             solvePressurePoisson(s);
-            const auto t1 = Clock::now();
-            const auto [rinf, rrms] = poissonResidual(s);
-            std::cout << n << "," << rinf << "," << rrms << ","
-                      << std::chrono::duration<double, std::milli>(t1 - t0).count() << "\n";
+            const ResidualReport r = poissonReport(s);
+            std::cout << n << "," << r.rmsAll << "," << r.rmsInterior << ","
+                      << r.rmsBoundary << "," << r.linf << ","
+                      << "\"" << r.linfI << ";" << r.linfJ << ";" << r.linfK << "\","
+                      << r.sumS << "," << r.sumAbsS << ","
+                      << (r.sumAbsS ? r.sumS / r.sumAbsS : 0.0) << ","
+                      << r.nInterior << "," << r.nBoundary << "\n";
             backendShutdown(s);
         }
         return 0;
