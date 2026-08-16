@@ -361,30 +361,51 @@ void solvePressurePoisson(SimState& s)
     const int kRef = (cfg.numCellsZ + 1) / 2;
     const double pRef = s.press(iRef, jRef, kRef);
 
+    // Swept (i, j, k) with k — GridField's unit-stride index — innermost.
+    // The original order was (i, k, j); both are lexicographic orders whose
+    // predecessor set for this 7-point star is exactly {im,jm,km}, so the
+    // Gauss-Seidel iteration is bit-identical, but j-innermost strode sK
+    // doubles per cell. Everything the k-loop cannot vary is hoisted.
+    const bool solidWall = (cfg.lateralCondition == LateralBC::SolidWall);
+    const int  nZ = cfg.numCellsZ;
+    const double omega = cfg.sorOmega;
+
     for (int sweep = 0; sweep < cfg.numPressureIter; ++sweep) {
         for (int i = 1; i <= cfg.numCellsX; ++i) {
             const int im = i-1, ip = i+1;
             int jLoopS, jLoopN; mirrorJRange(s, i, jLoopS, jLoopN);
+            const bool iIsLeftEdge  = (i == 1);
+            const bool iIsRightEdge = (i == cfg.numCellsX);
 
-            for (int k = 1; k <= cfg.numCellsZ; ++k) {
-                int km = k-1, kp = k+1;
-                for (int j = jLoopS; j <= jLoopN; ++j) {
-                    const int jm = j-1, jp = j+1;
+            for (int j = jLoopS; j <= jLoopN; ++j) {
+                const int jm = j-1, jp = j+1;
 
-                    // Neumann ghost-cell mirroring
-                    if (i == 1 || i == s.iLow[j]+1)             s.press(im, j, k) = s.press(i, j, k);
-                    if (i == cfg.numCellsX || i == s.iHigh[j])  s.press(ip, j, k) = s.press(i, j, k);
-                    if (j == jLoopS)                             s.press(i, jm, k) = s.press(i, j, k);
-                    if (j == jLoopN)                             s.press(i, jp, k) = s.press(i, j, k);
-                    if (cfg.lateralCondition == LateralBC::SolidWall) {
-                        if (k == 1)            s.press(i, j, km) = s.press(i, j, k);
-                        if (k == cfg.numCellsZ) s.press(i, j, kp) = s.press(i, j, k);
+                // Neumann ghost-cell mirroring — which faces mirror is fixed
+                // for the whole k-row.
+                const bool mirrorW = iIsLeftEdge  || (i == s.iLow[j]+1);
+                const bool mirrorE = iIsRightEdge || (i == s.iHigh[j]);
+                const bool mirrorS = (j == jLoopS);
+                const bool mirrorN = (j == jLoopN);
+                const bool corner  = (iIsLeftEdge || iIsRightEdge)
+                                  && (j == s.jLow[i]+1 || j == s.jHigh[i]);
+                const bool rowHasRef = (i == iRef && j == jRef);
+
+                for (int k = 1; k <= nZ; ++k) {
+                    int km = k-1, kp = k+1;
+
+                    if (mirrorW) s.press(im, j, k) = s.press(i, j, k);
+                    if (mirrorE) s.press(ip, j, k) = s.press(i, j, k);
+                    if (mirrorS) s.press(i, jm, k) = s.press(i, j, k);
+                    if (mirrorN) s.press(i, jp, k) = s.press(i, j, k);
+                    if (solidWall) {
+                        if (k == 1)  s.press(i, j, km) = s.press(i, j, k);
+                        if (k == nZ) s.press(i, j, kp) = s.press(i, j, k);
                     } else {
-                        if (k == 1)            km = cfg.numCellsZ;
-                        if (k == cfg.numCellsZ) kp = 1;
+                        if (k == 1)  km = nZ;
+                        if (k == nZ) kp = 1;
                     }
 
-                    if (i == iRef && j == jRef && k == kRef) {
+                    if (rowHasRef && k == kRef) {
                         s.press(i, j, k) = pRef;
                     } else {
                         double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
@@ -392,16 +413,16 @@ void solvePressurePoisson(SimState& s)
                                     + cZ*(s.press(i,j,kp) + s.press(i,j,km))
                                     - s.pressureSource(i,j,k)) * invDiag;
                         // Corner correction
-                        if ((i==1 || i==cfg.numCellsX) && (j==s.jLow[i]+1 || j==s.jHigh[i])) {
+                        if (corner) {
                             pNew -= s.pressureSource(i,j,k) * invDiag;
-                            if (cfg.lateralCondition == LateralBC::SolidWall && (k==1 || k==cfg.numCellsZ))
+                            if (solidWall && (k == 1 || k == nZ))
                                 pNew -= 2.0 * s.pressureSource(i,j,k) * invDiag;
                         }
                         // SOR: over-relax the Gauss-Seidel update (omega=1
                         // reduces to plain Gauss-Seidel) — same per-cell
                         // cost, converges to the same fixed point in fewer
                         // sweeps.
-                        s.press(i, j, k) += cfg.sorOmega * (pNew - s.press(i, j, k));
+                        s.press(i, j, k) += omega * (pNew - s.press(i, j, k));
                     }
                 }
             }
