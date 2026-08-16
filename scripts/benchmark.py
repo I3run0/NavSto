@@ -33,7 +33,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import BIN_DIR, NAVSOLVER, REPO_ROOT, build  # noqa: E402
+from harness import (BENCH_ENV, BIN_DIR, NAVSOLVER, REPO_ROOT,  # noqa: E402
+                     build, emit_json, envelope, stats)
 
 # Grid sizes only — geometry is fixed to AbruptExpansion (indices derived
 # purely from grid size, no baseUnit to misconfigure) so this harness
@@ -49,7 +50,7 @@ ACTIVE_CELLS_RE = re.compile(r"Active cells:\s*(\d+)")
 STEPS_RE = re.compile(r"Total steps\s*:\s*(\d+)")
 
 
-def make_config(nx, ny, nz, steps, num_pressure_iter, out_dir):
+def make_config(nx, ny, nz, steps, num_pressure_iter, out_dir, write_output=False):
     return f"""\
 numCellsX      = {nx}
 numCellsY      = {ny}
@@ -64,7 +65,7 @@ flowType       = SteadyMarching
 maxTimeSteps   = {steps}
 convergenceTol = 0
 numPressureIter = {num_pressure_iter}
-reportEveryN   = {steps + 1}
+reportEveryN   = {steps + 1 if write_output else 0}
 outputDir      = {out_dir}
 runName        = bench
 """
@@ -72,6 +73,7 @@ runName        = bench
 
 def run_once(binary, cfg_path, threads=None):
     env = dict(os.environ)
+    env.update(BENCH_ENV)
     if threads is not None:
         env["OMP_NUM_THREADS"] = str(threads)
     start = time.perf_counter()
@@ -115,6 +117,12 @@ def main():
                      help="comma-separated OMP_NUM_THREADS values to sweep (default: none -- "
                           "don't set the env var, i.e. a single run at the binary's default). "
                           "Ignored (harmlessly) by the plain serial binary.")
+    ap.add_argument("--with-io", action="store_true",
+                     help="write VTK snapshots during the timed run. Off by default: "
+                          "the unconditional t=0/final writes were ~38%% of a timed run "
+                          "at the large size, i.e. I/O the code under test cannot affect.")
+    ap.add_argument("--json", action="store_true",
+                     help="emit JSON on stdout (human table still goes to stderr)")
     ap.add_argument("--out", type=Path, default=None,
                      help="CSV output path (default: experiments/results/benchmarks/bench_<ts>.csv)")
     args = ap.parse_args()
@@ -148,7 +156,8 @@ def main():
         pass
 
     rows = []
-    print(f"{'size':<8} {'threads':>7} {'grid':<14} {'cells':>10} {'min s':>10} {'s/step':>10} {'ns/cell-step':>14}")
+    print(f"{'size':<8} {'threads':>7} {'grid':<14} {'cells':>10} {'min s':>10} "
+          f"{'s/step':>10} {'ns/cell-step':>14} {'spread':>8}", file=sys.stderr)
     with tempfile.TemporaryDirectory() as tmp:
         for size in sizes:
             nx, ny, nz = SIZE_MATRIX[size]
@@ -156,7 +165,9 @@ def main():
                 tag = f"{size}_{threads}" if threads else size
                 out_dir = Path(tmp) / tag
                 cfg_path = Path(tmp) / f"{tag}.cfg"
-                cfg_path.write_text(make_config(nx, ny, nz, args.steps, args.num_pressure_iter, out_dir))
+                cfg_path.write_text(make_config(nx, ny, nz, args.steps,
+                                                args.num_pressure_iter, out_dir,
+                                                write_output=args.with_io))
 
                 times, active_cells, steps_ran = [], None, None
                 for _ in range(args.repeats):
@@ -167,8 +178,9 @@ def main():
                     print(f"  WARNING: {tag} ran {steps_ran} steps, expected {args.steps} "
                           f"(convergenceTol=0 should prevent early stop)", file=sys.stderr)
 
-                best = min(times)
-                mean = sum(times) / len(times)
+                st = stats(times)
+                best = st["min"]
+                mean = st["mean"]
                 per_step = best / args.steps
                 per_cell_step = (per_step / active_cells) * 1e9 if active_cells else None
 
@@ -177,18 +189,26 @@ def main():
                     "active_cells": active_cells, "maxTimeSteps": args.steps,
                     "threads": threads or 1, "binary": args.binary,
                     "repeats": args.repeats, "min_seconds": best, "mean_seconds": mean,
+                    "median_seconds": st["median"], "stddev_seconds": st["stddev"],
+                    "rel_spread": st["rel_spread"], "with_io": args.with_io,
                     "seconds_per_step": per_step, "ns_per_active_cell_step": per_cell_step,
                     "git_commit": commit, "cpu": cpu, "cores": platform.os.cpu_count(),
                     "timestamp_utc": timestamp,
                 })
                 print(f"{size:<8} {threads or 1:>7} {f'{nx}x{ny}x{nz}':<14} {active_cells or 0:>10} "
-                      f"{best:>10.4f} {per_step:>10.5f} {per_cell_step or 0:>14.1f}")
+                      f"{best:>10.4f} {per_step:>10.5f} {per_cell_step or 0:>14.1f} "
+                      f"{st['rel_spread']:>7.1%}", file=sys.stderr)
 
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
     print(f"\nWrote {out_path}", file=sys.stderr)
+
+    if args.json:
+        emit_json(envelope(tool="benchmark", binary=args.binary,
+                           steps=args.steps, with_io=args.with_io,
+                           csv_path=str(out_path), runs=rows))
 
 
 if __name__ == "__main__":

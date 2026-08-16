@@ -25,12 +25,32 @@
 #include <stdexcept>
 
 // ---------------------------------------------------------------------------
-//  Snapshot — the only place field data has to be host-readable.
+//  Output gating.
+//
+//  reportEveryN = 0 means write nothing at all -- no VTK, no convergence CSV.
+//  That is what a benchmark wants: writing the t=0 and final snapshots
+//  unconditionally put ~38% of a timed run into ASCII I/O the thing under
+//  measurement cannot affect (144x72x36, 50 steps: 1.44s of 3.71s).
 // ---------------------------------------------------------------------------
+static bool outputEnabled(const SimState& s) { return s.cfg.reportEveryN > 0; }
+
+static bool snapshotDue(const SimState& s)
+{
+    return outputEnabled(s) && (s.timeStep % s.cfg.reportEveryN == 0);
+}
+
+/// Snapshot — the only place field data has to be host-readable.
 static void writeSnapshot(SimState& s, int step)
 {
+    if (!outputEnabled(s)) return;
     syncFieldsToHost(s);
     VtkExporter::writeSnapshot(s, step);
+}
+
+static void writeConvergence(const SimState& s)
+{
+    if (!outputEnabled(s)) return;
+    VtkExporter::writeConvergenceCSV(s);
 }
 
 // ---------------------------------------------------------------------------
@@ -59,9 +79,9 @@ static void runSteady(SimState& s)
                  "  DilMax=",   s.dilatationMax,
                  "  dt=",       s.timeStepSize);
 
-        VtkExporter::writeConvergenceCSV(s);
+        writeConvergence(s);
 
-        if (s.timeStep % s.cfg.reportEveryN == 0)
+        if (snapshotDue(s))
             writeSnapshot(s, s.timeStep);
 
     } while (s.momentumResidMax >= s.cfg.convergenceTol
@@ -118,9 +138,9 @@ static void runRK4(SimState& s)
                  "  ResidMax=", std::setprecision(3), std::scientific, s.momentumResidMax,
                  "  DilMax=",   s.dilatationMax);
 
-        VtkExporter::writeConvergenceCSV(s);
+        writeConvergence(s);
 
-        if (s.timeStep % s.cfg.reportEveryN == 0)
+        if (snapshotDue(s))
             writeSnapshot(s, s.timeStep);
 
     } while (s.momentumResidMax >= s.cfg.convergenceTol
@@ -189,7 +209,7 @@ int main(int argc, char* argv[])
 
     // Write t=0 snapshot
     writeSnapshot(s, 0);
-    VtkExporter::writeConvergenceCSV(s);
+    writeConvergence(s);
 
     // ── Time integration ──────────────────────────────────────────────────────
     try {

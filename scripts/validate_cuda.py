@@ -39,12 +39,14 @@ Usage:
 """
 
 import argparse
+from contextlib import nullcontext, redirect_stdout
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import (NAVSOLVER, NAVSOLVER_OMP, NAVSOLVER_CUDA,  # noqa: E402
+                     checks_envelope, emit_json,
                      build, compare_pressure_gauge_fixed,
                      compare_velocity_fields, run)
 from validate import REDBLACK_CFG_TEMPLATE, REDBLACK_TOL  # noqa: E402
@@ -216,6 +218,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--json", action="store_true",
+                     help="emit structured results on stdout")
     args = ap.parse_args()
 
     if not args.skip_build:
@@ -230,18 +234,23 @@ def main():
         print("navsolver_cuda not built (no CUDA toolchain?) — nothing to check.", file=sys.stderr)
         sys.exit(0)
 
-    ok = check_redblack_equivalence()
-    ok = check_rk4_equivalence() and ok
-    ok = check_determinism() and ok
-    ok = check_determinism_multiblock() and ok
+    with redirect_stdout(sys.stderr) if args.json else nullcontext():
+        ok = check_redblack_equivalence()
+        ok = check_rk4_equivalence() and ok
+        ok = check_determinism() and ok
+        ok = check_determinism_multiblock() and ok
 
-    print()
+    out = sys.stderr if args.json else sys.stdout
+    print(file=out)
     if ok:
         print("All CUDA-equivalence checks passed.")
-        sys.exit(0)
     else:
-        print("CUDA-equivalence checks FAILED.")
-        sys.exit(1)
+        print("CUDA-equivalence checks FAILED.", file=out)
+
+    if args.json:
+        emit_json(checks_envelope("cuda"))
+
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

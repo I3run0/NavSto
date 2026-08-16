@@ -36,12 +36,14 @@ Usage:
 """
 
 import argparse
+from contextlib import nullcontext, redirect_stdout
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import (NAVSOLVER, NAVSOLVER_OMP,  # noqa: E402
+                     checks_envelope, emit_json,
                      build, compare_velocity_fields, run)
 
 EQUIVALENCE_TOL = 1e-10   # relative, navsolver_omp vs navsolver (floating-point reordering)
@@ -130,6 +132,8 @@ def main():
     ap.add_argument("--threads", default="1,2,4,6,12",
                      help="comma-separated OMP_NUM_THREADS values to check (default: 1,2,4,6,12)")
     ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--json", action="store_true",
+                     help="emit structured results on stdout")
     args = ap.parse_args()
 
     threads_list = [int(t) for t in args.threads.split(",")]
@@ -143,16 +147,21 @@ def main():
         print("navsolver_omp not built (no OpenMP toolchain?) — nothing to check.", file=sys.stderr)
         sys.exit(0)
 
-    ok = check_thread_equivalence(threads_list)
-    ok = check_determinism(threads_list) and ok
+    with redirect_stdout(sys.stderr) if args.json else nullcontext():
+        ok = check_thread_equivalence(threads_list)
+        ok = check_determinism(threads_list) and ok
 
-    print()
+    out = sys.stderr if args.json else sys.stdout
+    print(file=out)
     if ok:
-        print("All parallel-equivalence checks passed.")
-        sys.exit(0)
+        print("All parallel-equivalence checks passed.", file=out)
     else:
-        print("Parallel-equivalence checks FAILED.")
-        sys.exit(1)
+        print("Parallel-equivalence checks FAILED.", file=out)
+
+    if args.json:
+        emit_json(checks_envelope("parallel"))
+
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

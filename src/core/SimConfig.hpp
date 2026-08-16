@@ -72,6 +72,10 @@ struct SimConfig {
 
     // Time integration
     int    maxTimeSteps    = 10000;
+    /// VTK snapshot cadence. 0 disables ALL output -- snapshots and the
+    /// convergence CSV -- which is what a benchmark run wants: the otherwise
+    /// unconditional t=0 and final writes are pure ASCII I/O the code under
+    /// measurement cannot affect. See Driver.cpp's outputEnabled().
     int    reportEveryN    = 1000;
     double convergenceTol  = 1e-6;
 

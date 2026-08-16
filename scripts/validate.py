@@ -44,6 +44,7 @@ Usage:
 """
 
 import argparse
+from contextlib import nullcontext, redirect_stdout
 import re
 import sys
 import tempfile
@@ -51,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import (REPO_ROOT, NAVSOLVER, NAVSOLVER_OMP,  # noqa: E402
+                     checks_envelope, emit_json,
                      build, compare_pressure_gauge_fixed, parse_convergence_csv,
                      parse_vtk_velocity, run)
 
@@ -246,6 +248,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--json", action="store_true",
+                     help="emit structured results on stdout")
     args = ap.parse_args()
 
     if not args.skip_build:
@@ -253,24 +257,29 @@ def main():
     elif not NAVSOLVER.exists():
         ap.error(f"{NAVSOLVER} not found; run without --skip-build first")
 
-    ok = check_conservation()
-    ok = check_poiseuille() and ok
+    with redirect_stdout(sys.stderr) if args.json else nullcontext():
+        ok = check_conservation()
+        ok = check_poiseuille() and ok
 
-    if not args.skip_build:
-        build("navsolver_omp")
-    omp_available = NAVSOLVER_OMP.exists()
-    if omp_available:
-        ok = check_redblack_equivalence() and ok
-    else:
-        print("\n== Red-black equivalence: SKIPPED (navsolver_omp not built) ==")
+        if not args.skip_build:
+            build("navsolver_omp")
+        omp_available = NAVSOLVER_OMP.exists()
+        if omp_available:
+            ok = check_redblack_equivalence() and ok
+        else:
+            print("\n== Red-black equivalence: SKIPPED (navsolver_omp not built) ==")
 
-    print()
+    out = sys.stderr if args.json else sys.stdout
+    print(file=out)
     if ok:
-        print("All physics checks passed.")
-        sys.exit(0)
+        print("All physics checks passed.", file=out)
     else:
-        print("Physics checks FAILED.")
-        sys.exit(1)
+        print("Physics checks FAILED.", file=out)
+
+    if args.json:
+        emit_json(checks_envelope("physics"))
+
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

@@ -220,6 +220,25 @@ if(OpenMP_CXX_FOUND)
     add_test(NAME unit_tests_omp COMMAND navsolver_tests_omp)
 endif()
 
+# ── Per-kernel microbenchmark ────────────────────────────────────────────────
+# The inner loop of an optimization cycle: times one operator on a realistic
+# state in ~1s, where a whole simulation takes tens of seconds and buries the
+# kernel under init, I/O and process noise. Own main(), so no DRIVER_SRC.
+# Built per host backend for the same reason the test suite is -- the point is
+# comparing what each backend does with the same kernel.
+set(KBENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/app/KernelBench.cpp)
+
+add_executable(navsolver_kbench ${KBENCH_SRC} ${SRCS} ${CORE_SRCS} ${HOST_SRC})
+target_include_directories(navsolver_kbench PRIVATE ${SHARED_INC} ${SRCDIR})
+navsolver_target_flags(navsolver_kbench)
+
+if(OpenMP_CXX_FOUND)
+    add_executable(navsolver_kbench_omp ${KBENCH_SRC} ${OMPSRCS} ${CORE_SRCS} ${HOST_SRC})
+    target_include_directories(navsolver_kbench_omp PRIVATE ${SHARED_INC} ${OMPSRCDIR})
+    navsolver_target_flags(navsolver_kbench_omp)
+    target_link_libraries(navsolver_kbench_omp PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
 # ── Solver-level validation scripts ──────────────────────────────────────────
 # The only checks that exercise a whole built binary end-to-end (VTK field
 # comparisons, thread-count equivalence, GPU determinism), so they are the real
@@ -258,6 +277,20 @@ if(Python3_Interpreter_FOUND)
     if(CMAKE_CUDA_COMPILER)
         add_validation_test(validate_cuda validate_cuda.py)
     endif()
+
+    # Measurement harnesses — no pass/fail, so targets only. roofline is
+    # registered here because it silently rotted once already: it drove the
+    # deleted Makefile for months and nothing noticed, since it was the one
+    # script with no CMake or ctest entry point.
+    foreach(tool roofline measure)
+        add_custom_target(${tool}
+            COMMAND ${CMAKE_COMMAND} -E env
+                    NAVSOLVER_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                    ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/${tool}.py
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            USES_TERMINAL)
+    endforeach()
 
     # Timing harness — not a test (no pass/fail), so target only.
     add_custom_target(bench
