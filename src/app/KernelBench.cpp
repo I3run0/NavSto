@@ -38,6 +38,12 @@ struct Options {
     int iters = 20;
     int warmup = 3;
     int numPressureIter = 5;
+    // Defaults to the production Reynolds number (experiments/configs/
+    // production_can.cfg), NOT the 100.0 the smoke configs use. Re sets the
+    // Peclet number, which selects the branch computeExponentialWeights takes
+    // -- polynomial below 0.1, exp() up to 200, saturation above -- so
+    // benchmarking at the wrong Re can measure a branch production never hits.
+    double reynoldsNumber = 10000.0;
 };
 
 [[noreturn]] void usage(const char* argv0, int code) {
@@ -47,7 +53,8 @@ struct Options {
         "  --grid NXxNYxNZ grid size (default: 96x48x24)\n"
         "  --iters N       timed calls per kernel (default: 20)\n"
         "  --warmup N      untimed calls first (default: 3)\n"
-        "  --pressure-iter N  numPressureIter (default: 5)\n";
+        "  --pressure-iter N  numPressureIter (default: 5)\n"
+        "  --re R          Reynolds number (default: 10000, the production value)\n";
     std::exit(code);
 }
 
@@ -78,6 +85,7 @@ Options parseArgs(int argc, char* argv[]) {
         else if (a == "--iters")         o.iters = std::stoi(next("--iters"));
         else if (a == "--warmup")        o.warmup = std::stoi(next("--warmup"));
         else if (a == "--pressure-iter") o.numPressureIter = std::stoi(next("--pressure-iter"));
+        else if (a == "--re")            o.reynoldsNumber = std::stod(next("--re"));
         else if (a == "-h" || a == "--help") usage(argv[0], 0);
         else { std::cerr << "unknown argument: " << a << "\n"; usage(argv[0], 2); }
     }
@@ -153,7 +161,7 @@ void buildState(SimState& s, const Options& o) {
     s.cfg.outletCondition  = OutletBC::ZeroFirstDeriv;
     s.cfg.initialProfile   = InitialProfile::InletProfile;
     s.cfg.flowType         = FlowType::SteadyMarching;
-    s.cfg.reynoldsNumber   = 100.0;
+    s.cfg.reynoldsNumber   = o.reynoldsNumber;
     s.cfg.hyperViscousStart = 0;
     s.cfg.cellSizeX = s.cfg.domainLengthX / s.cfg.numCellsX;
     s.cfg.cellSizeY = s.cfg.domainLengthY / s.cfg.numCellsY;
@@ -197,6 +205,7 @@ int main(int argc, char* argv[])
     std::cout << "  \"iters\": " << o.iters << ",\n";
     std::cout << "  \"warmup\": " << o.warmup << ",\n";
     std::cout << "  \"numPressureIter\": " << o.numPressureIter << ",\n";
+    std::cout << "  \"reynoldsNumber\": " << o.reynoldsNumber << ",\n";
 
     long long activeCells = 0;
     std::vector<std::string> records;
