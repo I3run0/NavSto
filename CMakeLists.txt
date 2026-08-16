@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(NavSolver LANGUAGES CXX)
 
-# C++20 for the FieldStorage concept (src/common/FieldStorage.hpp).
+# C++20 for the FieldStorage concept (src/core/FieldStorage.hpp).
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -13,30 +13,33 @@ set(SOLVERDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/solver)
 set(IODIR     ${CMAKE_CURRENT_SOURCE_DIR}/src/io)
 set(SHARED_INC ${COREDIR} ${SOLVERDIR} ${IODIR})
 
-set(SRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/serial)
+set(SRCDIR  ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/serial)
+set(HOSTDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/host)
 
 file(GLOB SRCS "${SRCDIR}/*.cpp")
 
-# Backend-independent sources, split by whether they define main().
+# Backend-independent sources, split by what they supply.
 #   CORE_SRCS   geometry + initial conditions — linked by EVERY target,
 #               including the test binaries.
-#   DRIVER_SRC  entry point + time-marching loops — linked by the CPU solver
-#               binaries only. The test binaries bring their own main(), and
-#               the CUDA binary has its own driver (src/cuda/main.cu).
+#   HOST_SRC    Backend.hpp for fields that live in host memory — serial and
+#               openmp share it; cuda supplies its own (CudaBackend.cu).
+#   DRIVER_SRC  entry point + time-marching loops — linked by every solver
+#               binary, cuda included. The test binaries bring their own main().
 # Per-kernel profiling. Off by default and zero-cost when off; see
-# src/common/KernelTimers.hpp.
+# src/io/KernelTimers.hpp.
 option(NAVSOLVER_PROFILE "Attribute wall time to each per-step kernel" OFF)
 
 if(NAVSOLVER_PROFILE)
     add_compile_definitions(NAVSOLVER_PROFILE)
     message(STATUS "Per-kernel profiling ENABLED — total runtime is not "
-                   "comparable to a normal build (see src/common/KernelTimers.hpp)")
+                   "comparable to a normal build (see src/io/KernelTimers.hpp)")
 endif()
 
 set(CORE_SRCS  ${SOLVERDIR}/Setup.cpp)
-set(DRIVER_SRC ${SOLVERDIR}/Driver.cpp)
+set(HOST_SRC   ${HOSTDIR}/HostBackend.cpp)
+set(DRIVER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Driver.cpp)
 
-add_executable(navsolver ${SRCS} ${CORE_SRCS} ${DRIVER_SRC})
+add_executable(navsolver ${SRCS} ${CORE_SRCS} ${HOST_SRC} ${DRIVER_SRC})
 
 # ${SRCDIR} first-class on the include path: SimState.hpp includes
 # "BackendConfig.hpp", which must resolve to THIS backend's copy.
@@ -97,7 +100,7 @@ if(OpenMP_CXX_FOUND)
     set(OMPSRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/openmp)
     file(GLOB OMPSRCS "${OMPSRCDIR}/*.cpp")
 
-    add_executable(navsolver_omp ${OMPSRCS} ${CORE_SRCS} ${DRIVER_SRC})
+    add_executable(navsolver_omp ${OMPSRCS} ${CORE_SRCS} ${HOST_SRC} ${DRIVER_SRC})
 
     target_include_directories(navsolver_omp PRIVATE ${SHARED_INC} ${OMPSRCDIR})
 
@@ -124,8 +127,10 @@ if(CMAKE_CUDA_COMPILER)
     set(CUDASRCDIR ${CMAKE_CURRENT_SOURCE_DIR}/src/backends/cuda)
     file(GLOB CUDASRCS "${CUDASRCDIR}/*.cu")
 
-    # Own driver (main.cu), so no DRIVER_SRC.
-    add_executable(navsolver_cuda ${CUDASRCS} ${CORE_SRCS})
+    # Shares the driver: cuda/BackendConfig.hpp keeps DeviceState opaque, so
+    # Driver.cpp still compiles as plain C++ here. CudaBackend.cu supplies the
+    # Backend.hpp side instead of HOST_SRC.
+    add_executable(navsolver_cuda ${CUDASRCS} ${CORE_SRCS} ${DRIVER_SRC})
 
     target_include_directories(navsolver_cuda PRIVATE ${SHARED_INC} ${CUDASRCDIR})
 
