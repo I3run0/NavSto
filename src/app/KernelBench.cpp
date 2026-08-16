@@ -16,6 +16,7 @@
 #include "Backend.hpp"
 #include "Physics.hpp"
 #include "KernelTimers.hpp"
+#include "Geometry.hpp"
 #include "Logger.hpp"
 
 #include <algorithm>
@@ -25,6 +26,7 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -133,6 +135,35 @@ Snapshot snapshotFor(const std::string& kernel) {
     return snap;
 }
 
+/// Max |laplacian(p) - S| over the interior, i.e. how far the pressure solve
+/// actually got. The kernel runs a fixed sweep count and never reports this,
+/// so "is 5 sweeps enough" was previously unanswerable without a trajectory
+/// experiment, which confounds solver accuracy with a different simulation.
+std::pair<double,double> poissonResidual(const SimState& s) {
+    const auto& cfg = s.cfg;
+    const double cX = 1.0 / s.cellSizeXsq, cY = 1.0 / s.cellSizeYsq, cZ = 1.0 / s.cellSizeZsq;
+    double worst = 0.0, sumSq = 0.0; long long n = 0;
+    for (int i = 1; i <= cfg.numCellsX; ++i) {
+        int jS, jN; activeJRange(s, i, jS, jN);
+        for (int j = jS; j <= jN; ++j)
+            for (int k = 1; k <= cfg.numCellsZ; ++k) {
+                int km = k-1, kp = k+1;
+                if (cfg.lateralCondition != LateralBC::SolidWall) {
+                    if (k == 1) km = cfg.numCellsZ;
+                    if (k == cfg.numCellsZ) kp = 1;
+                }
+                const double lap =
+                      cX*(s.press(i+1,j,k) - 2.0*s.press(i,j,k) + s.press(i-1,j,k))
+                    + cY*(s.press(i,j+1,k) - 2.0*s.press(i,j,k) + s.press(i,j-1,k))
+                    + cZ*(s.press(i,j,kp)  - 2.0*s.press(i,j,k) + s.press(i,j,km));
+                const double r = lap - s.pressureSource(i,j,k);
+                worst = std::max(worst, std::abs(r));
+                sumSq += r*r; ++n;
+            }
+    }
+    return {worst, n ? std::sqrt(sumSq / static_cast<double>(n)) : 0.0};
+}
+
 void callKernel(const std::string& k, SimState& s) {
     if      (k == "computeAccelerations")   computeAccelerations(s);
     else if (k == "buildPressureSource")    buildPressureSource(s);
@@ -201,6 +232,24 @@ int main(int argc, char* argv[])
 
     // Logger writes to stdout; keep it off so JSON is the only thing there.
     Logger::instance().setLevel(Logger::Level::ERR);
+
+    if (o.kernel == "poisson-report") {
+        // How much room is left in the pressure solve: residual and cost as a
+        // function of sweep count, on ONE fixed source.
+        std::cout << "sweeps,residual_inf,residual_rms,solve_ms\n" << std::scientific << std::setprecision(6);
+        for (int n : {1, 2, 5, 10, 20, 50, 100, 200, 500}) {
+            Options oo = o; oo.numPressureIter = n;
+            SimState s; buildState(s, oo);
+            const auto t0 = Clock::now();
+            solvePressurePoisson(s);
+            const auto t1 = Clock::now();
+            const auto [rinf, rrms] = poissonResidual(s);
+            std::cout << n << "," << rinf << "," << rrms << ","
+                      << std::chrono::duration<double, std::milli>(t1 - t0).count() << "\n";
+            backendShutdown(s);
+        }
+        return 0;
+    }
 
     std::vector<std::string> kernels;
     for (int i = 0; i < static_cast<int>(Kernel::COUNT); ++i)
