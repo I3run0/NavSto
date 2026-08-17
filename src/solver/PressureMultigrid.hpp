@@ -55,9 +55,14 @@ inline void mgBuild(const SimState& s, MultigridWorkspace& mg)
     mg.ny = cfg.numCellsY / 2;
     mg.nz = cfg.numCellsZ / 2;
 
-    // Coarse span per coarse column, contracted inward from the fine spans so
-    // the coarse active region never pokes outside the fine one. Conservative:
-    // a coarse cell straddling the mask edge simply does not participate.
+    // Coarse span per coarse column, contracted inward from the fine spans.
+    //
+    // Expanding it instead -- covering every fine cell, rounding outward -- was
+    // tried and diverges hard (interior RMS 2.4e8 after 500 cycles). Coarse
+    // cells with no active fine child restrict to rhs = 0 yet stay coupled to
+    // the active region through the Laplacian, so they are unconstrained
+    // unknowns that grow and feed back. Contraction leaves a thin uncovered
+    // band along a ramped mask, which is a real but far smaller error.
     mg.jLow.assign(mg.nx + 2, 0);
     mg.jHigh.assign(mg.nx + 2, 0);
     for (int ic = 0; ic <= mg.nx; ++ic) {
@@ -208,22 +213,61 @@ inline void mgCoarseSolve(const SimState& s, MultigridWorkspace& mg, int sweeps)
     mgCoarseShift(mg, mg.corr, mg.corr(iRefC, jRefC, kRefC));
 }
 
-/// Piecewise-constant prolongation: every fine cell takes its parent's
-/// correction. Cheaper than trilinear and adequate here — the correction is
-/// smooth by construction, and a post-smoothing sweep follows.
+/// Trilinear prolongation.
+///
+/// Cell-centred coarsening puts coarse cell ic over fine cells 2ic-1 and 2ic,
+/// so a fine cell sits either side of its parent's centre and interpolates
+/// 3/4 from that parent and 1/4 from the neighbour it leans toward. In 3-D that
+/// is the product of the three 1-D weights over eight coarse cells.
+///
+/// Replaces piecewise-constant injection, whose jumps at every coarse-cell
+/// boundary inject high-frequency error that one post-smoothing sweep cannot
+/// remove.
 inline void mgProlongAdd(SimState& s, const MultigridWorkspace& mg)
 {
     const auto& cfg = s.cfg;
+    const bool periodic = (cfg.lateralCondition != LateralBC::SolidWall);
+
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         int jS, jN; activeJRange(s, i, jS, jN);
-        const int ic = std::min((i + 1) / 2, mg.nx);
+
+        int icA = std::min(std::max((i + 1) / 2, 1), mg.nx);
+        int icB = (i & 1) ? icA - 1 : icA + 1;
+        icB = std::min(std::max(icB, 1), mg.nx);
+
         for (int j = jS; j <= jN; ++j) {
-            int jc = (j + 1) / 2;
-            if (jc < mg.jLow[ic] + 1) jc = mg.jLow[ic] + 1;
-            if (jc > mg.jHigh[ic])    jc = mg.jHigh[ic];
+            const int jcRaw = (j + 1) / 2;
+            const int jcNbr = (j & 1) ? jcRaw - 1 : jcRaw + 1;
+            // Each coarse column has its own active span, so clamp per column.
+            auto clampJ = [&](int ic, int jc) {
+                return std::min(std::max(jc, mg.jLow[ic] + 1), mg.jHigh[ic]);
+            };
+            const int jcA_iA = clampJ(icA, jcRaw), jcB_iA = clampJ(icA, jcNbr);
+            const int jcA_iB = clampJ(icB, jcRaw), jcB_iB = clampJ(icB, jcNbr);
+
             for (int k = 1; k <= cfg.numCellsZ; ++k) {
-                const int kc = std::min((k + 1) / 2, mg.nz);
-                s.press(i,j,k) += mg.corr(ic,jc,kc);
+                int kcA = (k + 1) / 2;
+                int kcB = (k & 1) ? kcA - 1 : kcA + 1;
+                if (periodic) {                       // z wraps
+                    if (kcA < 1)     kcA += mg.nz;
+                    if (kcA > mg.nz) kcA -= mg.nz;
+                    if (kcB < 1)     kcB += mg.nz;
+                    if (kcB > mg.nz) kcB -= mg.nz;
+                } else {
+                    kcA = std::min(std::max(kcA, 1), mg.nz);
+                    kcB = std::min(std::max(kcB, 1), mg.nz);
+                }
+
+                const double e =
+                    0.75*0.75*0.75 * mg.corr(icA, jcA_iA, kcA)
+                  + 0.75*0.75*0.25 * mg.corr(icA, jcA_iA, kcB)
+                  + 0.75*0.25*0.75 * mg.corr(icA, jcB_iA, kcA)
+                  + 0.75*0.25*0.25 * mg.corr(icA, jcB_iA, kcB)
+                  + 0.25*0.75*0.75 * mg.corr(icB, jcA_iB, kcA)
+                  + 0.25*0.75*0.25 * mg.corr(icB, jcA_iB, kcB)
+                  + 0.25*0.25*0.75 * mg.corr(icB, jcB_iB, kcA)
+                  + 0.25*0.25*0.25 * mg.corr(icB, jcB_iB, kcB);
+                s.press(i,j,k) += e;
             }
         }
     }
