@@ -1,0 +1,230 @@
+#pragma once
+// =============================================================================
+//  PressureMultigrid.hpp — two-level correction scheme for the pressure solve.
+//
+//  Gauss-Seidel kills high-frequency error in a sweep or two and then crawls:
+//  measured on the production shape, interior residual falls 3.7x over 500
+//  sweeps and is still moving. A coarse-grid correction is the standard answer
+//  — the smooth error GS cannot see is well represented on a grid half as fine
+//  and cheap to solve there.
+//
+//  Deliberately two-level, not a full V-cycle: it answers whether the coarse
+//  correction beats plain sweeping at all before anyone builds a hierarchy.
+//
+//  STATUS: IT DOES NOT. This does not converge and is worse than the Gauss-
+//  Seidel it replaces -- 1 cycle leaves interior RMS 6.07e-3 where 5 GS sweeps
+//  reach 2.81e-3, and more cycles make it worse. cfg.pressureSolver defaults to
+//  GaussSeidel and should stay there. Kept, behind that flag, because the
+//  failure is informative and a second attempt should start here rather than
+//  from scratch.
+//
+//  Two causes were found and fixed and did NOT rescue it: the coarse problem is
+//  singular under homogeneous Neumann (fixed by projecting rhs and the
+//  correction to zero mean, which turned outright divergence into stagnation),
+//  and the fine gauge drifts when a correction moves the pinned reference node
+//  (fixed by anchoring the correction there; no measurable effect).
+//
+//  What is left, in the order worth trying:
+//    1. The transfer pair is not variational. Full-weighting restriction's
+//       transpose is TRILINEAR prolongation, not the piecewise-constant
+//       injection below, so the coarse correction is not a Galerkin correction
+//       and there is no theory saying it must converge. Most likely culprit.
+//    2. The coarse operator is the plain Laplacian while the fine operator
+//       carries corner source scaling and inline mirroring, so the two solve
+//       different problems near the boundary.
+//    3. mgBuild contracts the coarse span inward (jLow rounds up, jHigh rounds
+//       down). On a ramped mask like RoundedCorner that leaves a band along the
+//       whole boundary with no coarse cell above it, and mgProlongAdd then
+//       clamps into range and applies a correction belonging to a different
+//       column there.
+// =============================================================================
+
+#include "Geometry.hpp"
+#include "MultigridWorkspace.hpp"
+#include "SimState.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+/// Geometry is fixed once initSimulation() has run, so this runs once.
+inline void mgBuild(const SimState& s, MultigridWorkspace& mg)
+{
+    const auto& cfg = s.cfg;
+    mg.nx = cfg.numCellsX / 2;
+    mg.ny = cfg.numCellsY / 2;
+    mg.nz = cfg.numCellsZ / 2;
+
+    // Coarse span per coarse column, contracted inward from the fine spans so
+    // the coarse active region never pokes outside the fine one. Conservative:
+    // a coarse cell straddling the mask edge simply does not participate.
+    mg.jLow.assign(mg.nx + 2, 0);
+    mg.jHigh.assign(mg.nx + 2, 0);
+    for (int ic = 0; ic <= mg.nx; ++ic) {
+        const int i = std::min(2 * ic, cfg.numCellsX);
+        mg.jLow[ic]  = (s.jLow[i] + 1) / 2;   // round up
+        mg.jHigh[ic] = s.jHigh[i] / 2;        // round down
+        if (mg.jHigh[ic] < mg.jLow[ic]) mg.jHigh[ic] = mg.jLow[ic];
+    }
+
+    mg.corr.resize(GridSize{mg.nx + 2, mg.ny + 2, mg.nz + 2});
+    mg.rhs .resize(GridSize{mg.nx + 2, mg.ny + 2, mg.nz + 2});
+    mg.fineRes.resize(s.g);
+    mg.built = true;
+}
+
+// ── Pieces of one correction pass ────────────────────────────────────────────
+
+/// r = S - lap(p) on the fine grid, over the cells the sweep owns.
+///
+/// The ghost layer already holds the mirrored Neumann values the last sweep
+/// wrote, so the same stencil the solver uses applies unchanged here.
+inline void mgFineResidual(const SimState& s, GridField<>& res)
+{
+    const auto& cfg = s.cfg;
+    const double cX = 1.0 / s.cellSizeXsq, cY = 1.0 / s.cellSizeYsq, cZ = 1.0 / s.cellSizeZsq;
+    const bool solid = (cfg.lateralCondition == LateralBC::SolidWall);
+
+    res.fill(0.0);
+    for (int i = 1; i <= cfg.numCellsX; ++i) {
+        int jS, jN; activeJRange(s, i, jS, jN);
+        for (int j = jS; j <= jN; ++j)
+            for (int k = 1; k <= cfg.numCellsZ; ++k) {
+                int km = k-1, kp = k+1;
+                if (!solid) { if (k == 1) km = cfg.numCellsZ; if (k == cfg.numCellsZ) kp = 1; }
+                const double lap =
+                      cX*(s.press(i+1,j,k) - 2.0*s.press(i,j,k) + s.press(i-1,j,k))
+                    + cY*(s.press(i,j+1,k) - 2.0*s.press(i,j,k) + s.press(i,j-1,k))
+                    + cZ*(s.press(i,j,kp)  - 2.0*s.press(i,j,k) + s.press(i,j,km));
+                res(i,j,k) = s.pressureSource(i,j,k) - lap;
+            }
+    }
+}
+
+/// Full-weighting restriction: each coarse cell averages its eight fine
+/// children. Children outside the fine active span contribute nothing and are
+/// not counted, so a coarse cell on the mask edge still gets a sane mean.
+inline void mgRestrict(const SimState& s, MultigridWorkspace& mg)
+{
+    const auto& cfg = s.cfg;
+    mg.rhs.fill(0.0);
+    mg.corr.fill(0.0);
+
+    for (int ic = 1; ic <= mg.nx; ++ic)
+        for (int jc = mg.jLow[ic] + 1; jc <= mg.jHigh[ic]; ++jc)
+            for (int kc = 1; kc <= mg.nz; ++kc) {
+                double sum = 0.0; int n = 0;
+                for (int di = 0; di < 2; ++di)
+                    for (int dj = 0; dj < 2; ++dj)
+                        for (int dk = 0; dk < 2; ++dk) {
+                            const int i = 2*ic - di, j = 2*jc - dj, k = 2*kc - dk;
+                            if (i < 1 || i > cfg.numCellsX) continue;
+                            int jS, jN; activeJRange(s, i, jS, jN);
+                            if (j < jS || j > jN) continue;
+                            if (k < 1 || k > cfg.numCellsZ) continue;
+                            sum += mg.fineRes(i,j,k); ++n;
+                        }
+                mg.rhs(ic,jc,kc) = n ? sum / n : 0.0;
+            }
+}
+
+/// Mean of a coarse field over the active cells.
+inline double mgCoarseMean(const MultigridWorkspace& mg, const GridField<>& f)
+{
+    double sum = 0.0; long long n = 0;
+    for (int i = 1; i <= mg.nx; ++i)
+        for (int j = mg.jLow[i] + 1; j <= mg.jHigh[i]; ++j)
+            for (int k = 1; k <= mg.nz; ++k) { sum += f(i,j,k); ++n; }
+    return n ? sum / static_cast<double>(n) : 0.0;
+}
+
+inline void mgCoarseShift(const MultigridWorkspace& mg, GridField<>& f, double d)
+{
+    for (int i = 1; i <= mg.nx; ++i)
+        for (int j = mg.jLow[i] + 1; j <= mg.jHigh[i]; ++j)
+            for (int k = 1; k <= mg.nz; ++k) f(i,j,k) -= d;
+}
+
+/// Gauss-Seidel on the coarse correction equation lap(e) = rhs, homogeneous
+/// Neumann by mirroring, e = 0 initially. The coarse operator is the plain
+/// Laplacian: a coarse grid only has to represent the smooth error well, it
+/// does not have to reproduce the fine solver's boundary treatment.
+///
+/// The null space has to be handled explicitly, and getting this wrong makes
+/// the whole scheme DIVERGE rather than converge slowly. Homogeneous Neumann on
+/// every face leaves the coarse operator singular: a constant is in its kernel.
+/// So the right-hand side is projected to zero mean first (otherwise the
+/// problem is unsolvable and the constant mode grows without bound), and the
+/// correction is projected to zero mean afterwards (otherwise it carries an
+/// arbitrary constant onto a fine field whose reference node is pinned, and the
+/// next smoothing sweep tears that one node back and manufactures residual).
+inline void mgCoarseSolve(const SimState& s, MultigridWorkspace& mg, int sweeps)
+{
+    const auto& cfg = s.cfg;
+    const double hx = 2.0 * cfg.cellSizeX, hy = 2.0 * cfg.cellSizeY, hz = 2.0 * cfg.cellSizeZ;
+    const double cX = 1.0/(hx*hx), cY = 1.0/(hy*hy), cZ = 1.0/(hz*hz);
+    const double invDiag = 0.5 / (cX + cY + cZ);
+    const bool solid = (cfg.lateralCondition == LateralBC::SolidWall);
+    // Over-relaxation is for the fine smoother; on a singular coarse problem it
+    // amplifies the very mode being projected out. Plain Gauss-Seidel here.
+    const double omega = 1.0;
+
+    mgCoarseShift(mg, mg.rhs, mgCoarseMean(mg, mg.rhs));   // enforce solvability
+
+    for (int sweep = 0; sweep < sweeps; ++sweep)
+        for (int i = 1; i <= mg.nx; ++i) {
+            const int jS = mg.jLow[i] + 1, jN = mg.jHigh[i];
+            for (int j = jS; j <= jN; ++j)
+                for (int k = 1; k <= mg.nz; ++k) {
+                    int km = k-1, kp = k+1;
+                    if (i == 1)      mg.corr(i-1,j,k) = mg.corr(i,j,k);
+                    if (i == mg.nx)  mg.corr(i+1,j,k) = mg.corr(i,j,k);
+                    if (j == jS)     mg.corr(i,j-1,k) = mg.corr(i,j,k);
+                    if (j == jN)     mg.corr(i,j+1,k) = mg.corr(i,j,k);
+                    if (solid) {
+                        if (k == 1)     mg.corr(i,j,km) = mg.corr(i,j,k);
+                        if (k == mg.nz) mg.corr(i,j,kp) = mg.corr(i,j,k);
+                    } else {
+                        if (k == 1)     km = mg.nz;
+                        if (k == mg.nz) kp = 1;
+                    }
+                    const double eNew = (cX*(mg.corr(i+1,j,k) + mg.corr(i-1,j,k))
+                                       + cY*(mg.corr(i,j+1,k) + mg.corr(i,j-1,k))
+                                       + cZ*(mg.corr(i,j,kp)  + mg.corr(i,j,km))
+                                       - mg.rhs(i,j,k)) * invDiag;
+                    mg.corr(i,j,k) += omega * (eNew - mg.corr(i,j,k));
+                }
+        }
+
+    // Anchor the correction at the coarse cell holding the fine grid's pinned
+    // reference node, not at the mean. The fine smoother pins press(iRef) to
+    // whatever it held on entry; a correction that moves that node shifts the
+    // gauge every cycle, and the next sweep tears the one pinned node back
+    // against a field that has drifted around it.
+    const int iRefC = std::min((cfg.numCellsX + 1) / 2, mg.nx);
+    int jRefC = ((s.jHigh[cfg.numCellsX] + s.jLow[cfg.numCellsX]) / 2 + 1) / 2;
+    jRefC = std::max(mg.jLow[iRefC] + 1, std::min(jRefC, mg.jHigh[iRefC]));
+    const int kRefC = std::min(((cfg.numCellsZ + 1) / 2 + 1) / 2, mg.nz);
+    mgCoarseShift(mg, mg.corr, mg.corr(iRefC, jRefC, kRefC));
+}
+
+/// Piecewise-constant prolongation: every fine cell takes its parent's
+/// correction. Cheaper than trilinear and adequate here — the correction is
+/// smooth by construction, and a post-smoothing sweep follows.
+inline void mgProlongAdd(SimState& s, const MultigridWorkspace& mg)
+{
+    const auto& cfg = s.cfg;
+    for (int i = 1; i <= cfg.numCellsX; ++i) {
+        int jS, jN; activeJRange(s, i, jS, jN);
+        const int ic = std::min((i + 1) / 2, mg.nx);
+        for (int j = jS; j <= jN; ++j) {
+            int jc = (j + 1) / 2;
+            if (jc < mg.jLow[ic] + 1) jc = mg.jLow[ic] + 1;
+            if (jc > mg.jHigh[ic])    jc = mg.jHigh[ic];
+            for (int k = 1; k <= cfg.numCellsZ; ++k) {
+                const int kc = std::min((k + 1) / 2, mg.nz);
+                s.press(i,j,k) += mg.corr(ic,jc,kc);
+            }
+        }
+    }
+}

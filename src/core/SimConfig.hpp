@@ -23,6 +23,9 @@ enum class OutletBC       { ZeroFirstDeriv, ZeroSecondDeriv };
 enum class LateralBC      { Periodic, SolidWall };
 enum class InitialProfile { InletProfile, PotentialFlow };
 enum class FlowType       { SteadyMarching, RK4Transient };
+/// GaussSeidel is the historical fixed-sweep smoother. Multigrid adds one
+/// coarse-grid correction around it; see src/solver/PressureMultigrid.hpp.
+enum class PressureSolver { GaussSeidel, Multigrid };
 
 // ---------------------------------------------------------------------------
 //  Configuration  —  all user-settable parameters in one plain-old-data pod.
@@ -99,4 +102,10 @@ struct SimConfig {
     // grid/BC mix without the divergence risk of pushing closer to 2.0;
     // see docs/serial-optimization.md for how this was chosen/verified.
     double sorOmega = 1.7;
+
+    /// Pressure Poisson strategy. Default keeps the historical behaviour.
+    PressureSolver pressureSolver = PressureSolver::GaussSeidel;
+    /// Multigrid only: sweeps before the coarse correction, on the coarse grid,
+    /// and after. numPressureIter is ignored on that path.
+    int mgPreSweeps = 1, mgCoarseSweeps = 8, mgPostSweeps = 1;
 };

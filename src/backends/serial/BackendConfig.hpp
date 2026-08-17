@@ -11,6 +11,7 @@
 #include "AccelScratch.hpp"
 #include "GridField.hpp"
 #include "KernelTimers.hpp"
+#include "MultigridWorkspace.hpp"
 #include "Rk4Workspace.hpp"
 
 /// Namespace SimState (and so every operator taking it) lands in, which is what
@@ -34,6 +35,10 @@ struct Extras {
 
     /// Allocated by backendStartup(), and only for RK4Transient runs.
     Rk4Workspace rk4;
+
+    /// Coarse grid for the multigrid pressure path; built on first use, and
+    /// only when cfg.pressureSolver selects it.
+    MultigridWorkspace mg;
 
     /// Called by SimState::allocateFields(), before initSimulation().
     void allocate(const SimConfig& cfg) {

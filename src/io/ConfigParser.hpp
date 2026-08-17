@@ -47,7 +47,8 @@ public:
             "numPressureIter", "sorOmega",
             "outputDir", "runName",
             "geometryShape", "geometryType", "lateralBC", "outletBC",
-            "initialProfile", "flowType",
+            "initialProfile", "flowType", "pressureSolver",
+            "mgPreSweeps", "mgCoarseSweeps", "mgPostSweeps",
         };
         return keys;
     }
@@ -101,6 +102,9 @@ public:
         setIfPresent(kv, "convergenceTol",   cfg.convergenceTol);
         setIfPresent(kv, "numPressureIter",  cfg.numPressureIter);
         setIfPresent(kv, "sorOmega",         cfg.sorOmega);
+        setIfPresent(kv, "mgPreSweeps",      cfg.mgPreSweeps);
+        setIfPresent(kv, "mgCoarseSweeps",   cfg.mgCoarseSweeps);
+        setIfPresent(kv, "mgPostSweeps",     cfg.mgPostSweeps);
 
         if (kv.count("outputDir"))  cfg.outputDir = kv["outputDir"];
         if (kv.count("runName"))    cfg.runName   = kv["runName"];
@@ -111,6 +115,7 @@ public:
         if (kv.count("outletBC"))       cfg.outletCondition  = parseOutlet(kv["outletBC"]);
         if (kv.count("initialProfile")) cfg.initialProfile   = parseProfile(kv["initialProfile"]);
         if (kv.count("flowType"))       cfg.flowType         = parseFlow(kv["flowType"]);
+        if (kv.count("pressureSolver")) cfg.pressureSolver   = parsePressureSolver(kv["pressureSolver"]);
 
         // Cell sizes: dx = Cmp/II, dy = Alt/JJ, dz = Lrg/KK  (matches NavSto_dynamic.cpp)
         cfg.cellSizeX = cfg.domainLengthX / cfg.numCellsX;
@@ -151,6 +156,10 @@ public:
         f << "outletBC          = " << toString(cfg.outletCondition)  << '\n';
         f << "initialProfile    = " << toString(cfg.initialProfile)   << '\n';
         f << "flowType          = " << toString(cfg.flowType)         << '\n';
+        f << "pressureSolver    = " << toString(cfg.pressureSolver)   << '\n';
+        f << "mgPreSweeps       = " << cfg.mgPreSweeps    << '\n';
+        f << "mgCoarseSweeps    = " << cfg.mgCoarseSweeps << '\n';
+        f << "mgPostSweeps      = " << cfg.mgPostSweeps   << '\n';
         f << "outputDir         = " << cfg.outputDir.string() << '\n';
         f << "runName           = " << cfg.runName          << '\n';
     }
@@ -206,6 +215,11 @@ private:
         if (v == "PotentialFlow") return InitialProfile::PotentialFlow;
         throw std::runtime_error("Unknown initialProfile: " + v);
     }
+    static PressureSolver parsePressureSolver(const std::string& v) {
+        if (v == "GaussSeidel") return PressureSolver::GaussSeidel;
+        if (v == "Multigrid")   return PressureSolver::Multigrid;
+        throw std::runtime_error("Unknown pressureSolver: " + v);
+    }
     static FlowType parseFlow(const std::string& v) {
         if (v == "SteadyMarching") return FlowType::SteadyMarching;
         if (v == "RK4Transient")   return FlowType::RK4Transient;
@@ -238,5 +252,8 @@ private:
     }
     static const char* toString(FlowType v) {
         return v == FlowType::SteadyMarching ? "SteadyMarching" : "RK4Transient";
+    }
+    static const char* toString(PressureSolver v) {
+        return v == PressureSolver::GaussSeidel ? "GaussSeidel" : "Multigrid";
     }
 };

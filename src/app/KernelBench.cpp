@@ -52,6 +52,8 @@ struct Options {
     // AbruptExpansion this used to hardcode.
     std::string shape = "RoundedCorner";
     int baseUnit = 40;
+    std::string solver = "GaussSeidel";
+    int mgPre = 1, mgCoarse = 8, mgPost = 1;
 };
 
 [[noreturn]] void usage(const char* argv0, int code) {
@@ -65,7 +67,9 @@ struct Options {
         "  --re R          Reynolds number (default: 10000, the production value)\n"
         "  --shape NAME    AbruptExpansion|AbruptContraction|SharpCorner|\n"
         "                  RoundedCorner|Straight (default: RoundedCorner)\n"
-        "  --base-unit N   geometry base unit NN (default: 40)\n";
+        "  --base-unit N   geometry base unit NN (default: 40)\n"
+        "  --solver NAME   GaussSeidel|Multigrid (default: GaussSeidel)\n"
+        "  --mg P,C,Q      multigrid pre,coarse,post sweeps (default: 1,8,1)\n";
     std::exit(code);
 }
 
@@ -99,6 +103,14 @@ Options parseArgs(int argc, char* argv[]) {
         else if (a == "--re")            o.reynoldsNumber = std::stod(next("--re"));
         else if (a == "--shape")         o.shape = next("--shape");
         else if (a == "--base-unit")     o.baseUnit = std::stoi(next("--base-unit"));
+        else if (a == "--solver")        o.solver = next("--solver");
+        else if (a == "--mg") {
+            const std::string v = next("--mg");
+            const auto c1 = v.find(','), c2 = v.find(',', c1 + 1);
+            o.mgPre    = std::stoi(v.substr(0, c1));
+            o.mgCoarse = std::stoi(v.substr(c1 + 1, c2 - c1 - 1));
+            o.mgPost   = std::stoi(v.substr(c2 + 1));
+        }
         else if (a == "-h" || a == "--help") usage(argv[0], 0);
         else { std::cerr << "unknown argument: " << a << "\n"; usage(argv[0], 2); }
     }
@@ -231,6 +243,9 @@ void buildState(SimState& s, const Options& o) {
     s.cfg.numCellsZ = o.numCellsZ;
     s.cfg.numPressureIter = o.numPressureIter;
     s.cfg.baseUnit = o.baseUnit;
+    s.cfg.pressureSolver = (o.solver == "Multigrid") ? PressureSolver::Multigrid
+                                                     : PressureSolver::GaussSeidel;
+    s.cfg.mgPreSweeps = o.mgPre; s.cfg.mgCoarseSweeps = o.mgCoarse; s.cfg.mgPostSweeps = o.mgPost;
     s.cfg.geometryShape =
           o.shape == "AbruptExpansion"   ? GeometryShape::AbruptExpansion
         : o.shape == "AbruptContraction" ? GeometryShape::AbruptContraction
@@ -273,10 +288,13 @@ int main(int argc, char* argv[])
         std::cout << "sweeps,rms_all,rms_interior,rms_boundary,linf,linf_at,"
                      "sumS,sumAbsS,compat_ratio,n_interior,n_boundary\n"
                   << std::scientific << std::setprecision(6);
+        const bool mg = (o.solver == "Multigrid");
         for (int n : {1, 5, 20, 100, 500}) {
             Options oo = o; oo.numPressureIter = n;
             SimState s; buildState(s, oo);
-            solvePressurePoisson(s);
+            // For multigrid, n counts CYCLES, not sweeps.
+            for (int c = 0; c < (mg ? n : 1); ++c) solvePressurePoisson(s);
+            if (!mg) { /* one call already ran numPressureIter sweeps */ }
             const ResidualReport r = poissonReport(s);
             std::cout << n << "," << r.rmsAll << "," << r.rmsInterior << ","
                       << r.rmsBoundary << "," << r.linf << ","
