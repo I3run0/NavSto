@@ -206,20 +206,17 @@ void computeAccelerations(SimState& s)
 #else
         const int tid = 0;
 #endif
-        double* ppin = s.ext.accel.ppin.data() + tid * s.ext.accel.scratchLenPerThread;
-        double* ppis = s.ext.accel.ppis.data() + tid * s.ext.accel.scratchLenPerThread;
         double* ppiu = s.ext.accel.ppiu.data() + tid * s.ext.accel.scratchLenPerThread;
         double* ppid = s.ext.accel.ppid.data() + tid * s.ext.accel.scratchLenPerThread;
-        double* qsin = s.ext.accel.qsin.data() + tid * s.ext.accel.scratchLenPerThread;
         double* qsiu = s.ext.accel.qsiu.data() + tid * s.ext.accel.scratchLenPerThread;
         double* Ku   = s.ext.accel.Ku.data()   + tid * s.ext.accel.scratchLenPerThread;
         double* Kv   = s.ext.accel.Kv.data()   + tid * s.ext.accel.scratchLenPerThread;
         double* Kw   = s.ext.accel.Kw.data()   + tid * s.ext.accel.scratchLenPerThread;
 
-        // X-sweep-only 2-D (i,k) scratch — see SimState.hpp field comments
-        // and docs/serial-optimization-loop-order.md. Replaces the 1-D
-        // ppie/ppiw/qsie buffers (and this sweep's private use of Ku/Kv/Kw,
-        // which the Y/Z sweeps below still use in their own 1-D slices).
+        // 2-D (i,k) scratch, used by the X sweep and then re-used by the Y
+        // sweep as (j,k) once X is finished — see the alias block there. The
+        // 1-D ppin/ppis/qsin slices these replaced are gone; only the Z sweep
+        // still needs 1-D buffers.
         double* ppieXK = s.ext.accel.ppieXK.data() + tid * s.ext.accel.xk2DLenPerThread;
         double* ppiwXK = s.ext.accel.ppiwXK.data() + tid * s.ext.accel.xk2DLenPerThread;
         double* qsieXK = s.ext.accel.qsieXK.data() + tid * s.ext.accel.xk2DLenPerThread;
@@ -252,8 +249,25 @@ void computeAccelerations(SimState& s)
         const int iStart = s.iLow[j];
         const int iEnd   = s.iHigh[j];
 
-        // Pass 1: face coefficients (between i and i+1)
-        for (int i = iStart; i <= iEnd-1; ++i) {
+        // Passes 1-3, fused into one traversal.
+        //
+        // All three read velX/velY/velZ at i-1, i and i+1. Run separately they
+        // streamed those three fields three times over, and at the production
+        // grid one field is 21.9 MB against a 12 MB L3 -- nothing survived from
+        // one pass to the next, so each re-read went to DRAM.
+        //
+        // Fusing is legal because the only cross-pass dependency resolves
+        // inside a single (i, k) iteration: pass 2 needs ppie[i+1] (pass 1
+        // writes it at this same i and k, just above) and ppiw[i+1] (pass 1
+        // wrote it at i-1, the previous iteration). Pass 3 reads no pass
+        // output at all. Every arithmetic expression below is kept in its
+        // original association -- floating-point addition is not associative,
+        // and the golden-field test pins this kernel to 1e-12.
+        //
+        // i = iStart is peeled: passes 2 and 3 start at iStart+1, and peeling
+        // keeps a branch out of the fused loop.
+        {
+            const int i = iStart;
             const double localRe = 1.0 / effectiveInvRe(s, i);
             for (int k = 1; k <= KKfim; ++k) {
                 const double uFace = 0.5 * (s.velX(i+1, j, k) + s.velX(i, j, k));
@@ -261,35 +275,45 @@ void computeAccelerations(SimState& s)
                 double pip, cip, cim;
                 computeExponentialWeights(localRe, DPe, pip, cip, cim);
                 VM2(ppieXK, i+1, k) = cip;      // east coefficient at face i+0.5
-                VM2(ppiwXK, i+1+1, k) = cim;    // west coefficient (ip+1, ip=i+1) -- see 1-D version's comment history
+                VM2(ppiwXK, i+1+1, k) = cim;    // west coefficient (ip+1, ip=i+1)
                 VM2(qsieXK, i+1, k) = computeQsi(DPe, pip, 0.5);
             }
         }
-        // Pass 2: diffusive part of Au, Av, Aw (first part)
-        for (int i = iStart+1; i <= iEnd-1; ++i) {
-            for (int k = 1; k <= KKfim; ++k) {
-                const double coeff = invDx2;
-                s.accelX(i, j, k) += (VM2(ppieXK,i+1,k)*(s.velX(i+1,j,k)-s.velX(i,j,k))
-                                     + VM2(ppiwXK,i+1,k)*(s.velX(i-1,j,k)-s.velX(i,j,k))) * coeff;
-                s.accelY(i, j, k) += (VM2(ppieXK,i+1,k)*(s.velY(i+1,j,k)-s.velY(i,j,k))
-                                     + VM2(ppiwXK,i+1,k)*(s.velY(i-1,j,k)-s.velY(i,j,k))) * coeff;
-                s.accelZ(i, j, k) += (VM2(ppieXK,i+1,k)*(s.velZ(i+1,j,k)-s.velZ(i,j,k))
-                                     + VM2(ppiwXK,i+1,k)*(s.velZ(i-1,j,k)-s.velZ(i,j,k))) * coeff;
-            }
-        }
-        // Pass 3: cross‑term correction (K * qsi)
         for (int i = iStart+1; i <= iEnd-1; ++i) {
             const double localRe = 1.0 / effectiveInvRe(s, i);
             for (int k = 1; k <= KKfim; ++k) {
-                const double uCell = s.velX(i, j, k);
-                const double DPe = localRe * uCell * cfg.cellSizeX;
-                double pip, cip, cim;
-                computeExponentialWeights(localRe, DPe, pip, cip, cim);
-                cip *= invDx2;
-                cim *= invDx2;
-                VM2(KuXK, i+1, k) = cip*(s.velX(i,j,k)-s.velX(i+1,j,k)) + cim*(s.velX(i,j,k)-s.velX(i-1,j,k));
-                VM2(KvXK, i+1, k) = cip*(s.velY(i,j,k)-s.velY(i+1,j,k)) + cim*(s.velY(i,j,k)-s.velY(i-1,j,k));
-                VM2(KwXK, i+1, k) = cip*(s.velZ(i,j,k)-s.velZ(i+1,j,k)) + cim*(s.velZ(i,j,k)-s.velZ(i-1,j,k));
+                // One load of each field per (i,k), shared by all three passes.
+                const double vxm = s.velX(i-1,j,k), vx0 = s.velX(i,j,k), vxp = s.velX(i+1,j,k);
+                const double vym = s.velY(i-1,j,k), vy0 = s.velY(i,j,k), vyp = s.velY(i+1,j,k);
+                const double vzm = s.velZ(i-1,j,k), vz0 = s.velZ(i,j,k), vzp = s.velZ(i+1,j,k);
+
+                // Pass 1: face coefficients (between i and i+1)
+                const double uFace = 0.5 * (vxp + vx0);
+                const double DPeFace = localRe * uFace * cfg.cellSizeX;
+                double pipF, cipF, cimF;
+                computeExponentialWeights(localRe, DPeFace, pipF, cipF, cimF);
+                VM2(ppieXK, i+1, k) = cipF;
+                VM2(ppiwXK, i+1+1, k) = cimF;
+                VM2(qsieXK, i+1, k) = computeQsi(DPeFace, pipF, 0.5);
+
+                // Pass 2: diffusive part of Au, Av, Aw (first part)
+                const double coeff = invDx2;
+                const double ppie = VM2(ppieXK,i+1,k);   // written just above
+                const double ppiw = VM2(ppiwXK,i+1,k);   // written at i-1
+                s.accelX(i, j, k) += (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
+                s.accelY(i, j, k) += (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
+                s.accelZ(i, j, k) += (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
+
+                // Pass 3: cross-term correction (K * qsi)
+                const double uCell = vx0;
+                const double DPeCell = localRe * uCell * cfg.cellSizeX;
+                double pipC, cipC, cimC;
+                computeExponentialWeights(localRe, DPeCell, pipC, cipC, cimC);
+                cipC *= invDx2;
+                cimC *= invDx2;
+                VM2(KuXK, i+1, k) = cipC*(vx0-vxp) + cimC*(vx0-vxm);
+                VM2(KvXK, i+1, k) = cipC*(vy0-vyp) + cimC*(vy0-vym);
+                VM2(KwXK, i+1, k) = cipC*(vz0-vzp) + cimC*(vz0-vzm);
             }
         }
         // Extrapolate Ku,Kv,Kw at boundaries -- per k, unchanged formula
@@ -320,6 +344,15 @@ void computeAccelerations(SimState& s)
     }
 
     // ---------- Direction Y ----------
+    // Same restructuring the X-sweep already had, for the same reason: j
+    // carries the pass-to-pass recurrence and cannot move, but nothing here
+    // references k+-1, so k becomes the innermost unit-stride loop and the
+    // scratch widens to (j, k). The 2-D buffers are the X-sweep's, reused --
+    // that sweep is complete and its scratch dead by this point, and both
+    // dimensions are sized off maxDim, so no extra allocation is needed.
+    double* ppinJK = ppieXK; double* ppisJK = ppiwXK; double* qsinJK = qsieXK;
+    double* KuJK = KuXK; double* KvJK = KvXK; double* KwJK = KwXK;
+
     const double invDy2 = 1.0 / (cfg.cellSizeY * cfg.cellSizeY);
     // Parallel over i -- same reasoning as the X-sweep's #pragma omp for
     // above, just over the Y-sweep's outer dimension instead.
@@ -329,50 +362,78 @@ void computeAccelerations(SimState& s)
         const int jEnd   = s.jHigh[i];
         const double invRe = effectiveInvRe(s, i);
         const double localRe = 1.0 / invRe;
-        for (int k = 1; k <= KKfim; ++k) {
-            for (int j = jStart; j <= jEnd-1; ++j) {
+
+        // Passes 1-3 fused, exactly as the X sweep above and for the same
+        // reason: all three read velX/velY/velZ at j-1, j and j+1, and the only
+        // cross-pass dependency (pass 2 needs ppin[j+1] from pass 1 at this j,
+        // and ppis[j+1] from pass 1 at j-1) resolves inside one iteration.
+        {
+            const int j = jStart;
+            for (int k = 1; k <= KKfim; ++k) {
                 const double vFace = 0.5 * (s.velY(i, j+1, k) + s.velY(i, j, k));
                 const double DPe = localRe * vFace * cfg.cellSizeY;
                 double pip, cin, cis;
                 computeExponentialWeights(localRe, DPe, pip, cin, cis);
-                VM(ppin, j+1) = cin;
-                VM(ppis, j+2) = cis;
-                VM(qsin, j+1) = computeQsi(DPe, pip, 0.5);
+                VM2(ppinJK, j+1, k) = cin;
+                VM2(ppisJK, j+2, k) = cis;
+                VM2(qsinJK, j+1, k) = computeQsi(DPe, pip, 0.5);
             }
-            for (int j = jStart+1; j <= jEnd-1; ++j) {
+        }
+        for (int j = jStart+1; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
+                // One load of each field per (j,k), shared by all three passes.
+                const double vxm = s.velX(i,j-1,k), vx0 = s.velX(i,j,k), vxp = s.velX(i,j+1,k);
+                const double vym = s.velY(i,j-1,k), vy0 = s.velY(i,j,k), vyp = s.velY(i,j+1,k);
+                const double vzm = s.velZ(i,j-1,k), vz0 = s.velZ(i,j,k), vzp = s.velZ(i,j+1,k);
+
+                // Pass 1: face coefficients (between j and j+1)
+                const double vFace = 0.5 * (vyp + vy0);
+                const double DPeFace = localRe * vFace * cfg.cellSizeY;
+                double pipF, cinF, cisF;
+                computeExponentialWeights(localRe, DPeFace, pipF, cinF, cisF);
+                VM2(ppinJK, j+1, k) = cinF;
+                VM2(ppisJK, j+2, k) = cisF;
+                VM2(qsinJK, j+1, k) = computeQsi(DPeFace, pipF, 0.5);
+
+                // Pass 2: diffusive part of Au, Av, Aw
                 const double coeff = invDy2;
-                s.accelX(i, j, k) += (VM(ppin,j+1)*(s.velX(i,j+1,k)-s.velX(i,j,k))
-                                     + VM(ppis,j+1)*(s.velX(i,j-1,k)-s.velX(i,j,k))) * coeff;
-                s.accelY(i, j, k) += (VM(ppin,j+1)*(s.velY(i,j+1,k)-s.velY(i,j,k))
-                                     + VM(ppis,j+1)*(s.velY(i,j-1,k)-s.velY(i,j,k))) * coeff;
-                s.accelZ(i, j, k) += (VM(ppin,j+1)*(s.velZ(i,j+1,k)-s.velZ(i,j,k))
-                                     + VM(ppis,j+1)*(s.velZ(i,j-1,k)-s.velZ(i,j,k))) * coeff;
+                const double ppin = VM2(ppinJK,j+1,k);   // written just above
+                const double ppis = VM2(ppisJK,j+1,k);   // written at j-1
+                s.accelX(i, j, k) += (ppin*(vxp-vx0) + ppis*(vxm-vx0)) * coeff;
+                s.accelY(i, j, k) += (ppin*(vyp-vy0) + ppis*(vym-vy0)) * coeff;
+                s.accelZ(i, j, k) += (ppin*(vzp-vz0) + ppis*(vzm-vz0)) * coeff;
+
+                // Pass 3: cross-term correction (K * qsi)
+                const double vCell = vy0;
+                const double DPeCell = localRe * vCell * cfg.cellSizeY;
+                double pipC, cinC, cisC;
+                computeExponentialWeights(localRe, DPeCell, pipC, cinC, cisC);
+                cinC *= invDy2;  cisC *= invDy2;
+                VM2(KuJK, j+1, k) = cinC*(vx0-vxp) + cisC*(vx0-vxm);
+                VM2(KvJK, j+1, k) = cinC*(vy0-vyp) + cisC*(vy0-vym);
+                VM2(KwJK, j+1, k) = cinC*(vz0-vzp) + cisC*(vz0-vzm);
             }
-            for (int j = jStart+1; j <= jEnd-1; ++j) {
-                const double vCell = s.velY(i, j, k);
-                const double DPe = localRe * vCell * cfg.cellSizeY;
-                double pip, cin, cis;
-                computeExponentialWeights(localRe, DPe, pip, cin, cis);
-                cin *= invDy2;  cis *= invDy2;
-                VM(Ku, j+1) = cin*(s.velX(i,j,k)-s.velX(i,j+1,k)) + cis*(s.velX(i,j,k)-s.velX(i,j-1,k));
-                VM(Kv, j+1) = cin*(s.velY(i,j,k)-s.velY(i,j+1,k)) + cis*(s.velY(i,j,k)-s.velY(i,j-1,k));
-                VM(Kw, j+1) = cin*(s.velZ(i,j,k)-s.velZ(i,j+1,k)) + cis*(s.velZ(i,j,k)-s.velZ(i,j-1,k));
+        }
+        for (int k = 1; k <= KKfim; ++k) {
+            VM2(KuJK, jStart+1, k) = 2.0*VM2(KuJK, jStart+2, k) - VM2(KuJK, jStart+3, k);
+            VM2(KvJK, jStart+1, k) = 2.0*VM2(KvJK, jStart+2, k) - VM2(KvJK, jStart+3, k);
+            VM2(KwJK, jStart+1, k) = 2.0*VM2(KwJK, jStart+2, k) - VM2(KwJK, jStart+3, k);
+            VM2(KuJK, jEnd+1, k)   = 2.0*VM2(KuJK, jEnd, k)   - VM2(KuJK, jEnd-1, k);
+            VM2(KvJK, jEnd+1, k)   = 2.0*VM2(KvJK, jEnd, k)   - VM2(KvJK, jEnd-1, k);
+            VM2(KwJK, jEnd+1, k)   = 2.0*VM2(KwJK, jEnd, k)   - VM2(KwJK, jEnd-1, k);
+        }
+        for (int j = jStart; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
+                VM2(KuJK, j+1, k) = 0.5*(VM2(KuJK, j+1, k) + VM2(KuJK, j+2, k));
+                VM2(KvJK, j+1, k) = 0.5*(VM2(KvJK, j+1, k) + VM2(KvJK, j+2, k));
+                VM2(KwJK, j+1, k) = 0.5*(VM2(KwJK, j+1, k) + VM2(KwJK, j+2, k));
             }
-            VM(Ku, jStart+1) = 2.0*VM(Ku, jStart+2) - VM(Ku, jStart+3);
-            VM(Kv, jStart+1) = 2.0*VM(Kv, jStart+2) - VM(Kv, jStart+3);
-            VM(Kw, jStart+1) = 2.0*VM(Kw, jStart+2) - VM(Kw, jStart+3);
-            VM(Ku, jEnd+1)   = 2.0*VM(Ku, jEnd)   - VM(Ku, jEnd-1);
-            VM(Kv, jEnd+1)   = 2.0*VM(Kv, jEnd)   - VM(Kv, jEnd-1);
-            VM(Kw, jEnd+1)   = 2.0*VM(Kw, jEnd)   - VM(Kw, jEnd-1);
-            for (int j = jStart; j <= jEnd-1; ++j) {
-                VM(Ku, j+1) = 0.5*(VM(Ku, j+1) + VM(Ku, j+2));
-                VM(Kv, j+1) = 0.5*(VM(Kv, j+1) + VM(Kv, j+2));
-                VM(Kw, j+1) = 0.5*(VM(Kw, j+1) + VM(Kw, j+2));
-            }
-            for (int j = jStart+1; j <= jEnd-1; ++j) {
-                s.accelX(i, j, k) -= (VM(Ku,j+1)*VM(qsin,j+1) - VM(Ku,j)*VM(qsin,j));
-                s.accelY(i, j, k) -= (VM(Kv,j+1)*VM(qsin,j+1) - VM(Kv,j)*VM(qsin,j));
-                s.accelZ(i, j, k) -= (VM(Kw,j+1)*VM(qsin,j+1) - VM(Kw,j)*VM(qsin,j));
+        }
+        for (int j = jStart+1; j <= jEnd-1; ++j) {
+            for (int k = 1; k <= KKfim; ++k) {
+                s.accelX(i, j, k) -= (VM2(KuJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KuJK,j,k)*VM2(qsinJK,j,k));
+                s.accelY(i, j, k) -= (VM2(KvJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KvJK,j,k)*VM2(qsinJK,j,k));
+                s.accelZ(i, j, k) -= (VM2(KwJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KwJK,j,k)*VM2(qsinJK,j,k));
             }
         }
     }
