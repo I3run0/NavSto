@@ -80,29 +80,86 @@ inline void mgBuild(const SimState& s, MultigridWorkspace& mg)
 
 // ── Pieces of one correction pass ────────────────────────────────────────────
 
-/// r = S - lap(p) on the fine grid, over the cells the sweep owns.
+/// Re-mirror the Neumann ghost layer against the CURRENT pressure field.
 ///
-/// The ghost layer already holds the mirrored Neumann values the last sweep
-/// wrote, so the same stencil the solver uses applies unchanged here.
-inline void mgFineResidual(const SimState& s, GridField<>& res)
+/// The smoother writes each row's ghosts before it updates that row, so after
+/// the last sweep every ghost is one update stale. The residual stencil reads
+/// those ghosts, so it has to see them refreshed or it measures a lag rather
+/// than an error. Same rule set as the smoother, extracted.
+inline void mgMirrorGhosts(SimState& s)
+{
+    const auto& cfg = s.cfg;
+    const bool solid = (cfg.lateralCondition == LateralBC::SolidWall);
+    const int nZ = cfg.numCellsZ;
+
+    for (int i = 1; i <= cfg.numCellsX; ++i) {
+        int jLoopS, jLoopN; mirrorJRange(s, i, jLoopS, jLoopN);
+        for (int j = jLoopS; j <= jLoopN; ++j) {
+            const bool mirrorW = (i == 1) || (i == s.iLow[j] + 1);
+            const bool mirrorE = (i == cfg.numCellsX) || (i == s.iHigh[j]);
+            const bool mirrorS = (j == jLoopS);
+            const bool mirrorN = (j == jLoopN);
+            for (int k = 1; k <= nZ; ++k) {
+                if (mirrorW) s.press(i-1, j, k) = s.press(i, j, k);
+                if (mirrorE) s.press(i+1, j, k) = s.press(i, j, k);
+                if (mirrorS) s.press(i, j-1, k) = s.press(i, j, k);
+                if (mirrorN) s.press(i, j+1, k) = s.press(i, j, k);
+                if (solid) {
+                    if (k == 1)  s.press(i, j, k-1) = s.press(i, j, k);
+                    if (k == nZ) s.press(i, j, k+1) = s.press(i, j, k);
+                }
+            }
+        }
+    }
+}
+
+/// r = S - lap(p) on the fine grid, over the cells the smoother owns.
+///
+/// Note what is deliberately NOT here. Setting pNew == p in the smoother's
+/// update gives lap(p) = f*S, where the corner correction makes f = 2 on a
+/// corner cell and f = 4 when a SolidWall k face is also involved -- so the
+/// algebraically correct right-hand side is f*S, and the coarse grid's plain
+/// Laplacian was always the right OPERATOR. Feeding f*S here was tried and is
+/// measurably worse (5 cycles of 2,16,2: 1.65e-3 with f = 1 against 2.56e-3
+/// with the true f). The reason is a multigrid one rather than an algebraic
+/// one: f*S puts a large, sharply localised residual on corner cells, which is
+/// exactly the high-frequency content a coarse grid cannot represent, so
+/// restricting it injects error instead of removing it. Damping the boundary
+/// residual is standard practice; f = 1 is the crude version of it.
+///
+/// Bounds follow the smoother's own (mirrorJRange), not activeJRange, and the
+/// pinned reference cell carries no equation.
+inline void mgFineResidual(SimState& s, GridField<>& res)
 {
     const auto& cfg = s.cfg;
     const double cX = 1.0 / s.cellSizeXsq, cY = 1.0 / s.cellSizeYsq, cZ = 1.0 / s.cellSizeZsq;
     const bool solid = (cfg.lateralCondition == LateralBC::SolidWall);
+    const int nZ = cfg.numCellsZ;
+    const int iRef = cfg.numCellsX;
+    const int jRef = (s.jHigh[cfg.numCellsX] + s.jLow[cfg.numCellsX]) / 2;
+    const int kRef = (nZ + 1) / 2;
 
+    mgMirrorGhosts(s);
     res.fill(0.0);
+
     for (int i = 1; i <= cfg.numCellsX; ++i) {
-        int jS, jN; activeJRange(s, i, jS, jN);
-        for (int j = jS; j <= jN; ++j)
-            for (int k = 1; k <= cfg.numCellsZ; ++k) {
+        int jLoopS, jLoopN; mirrorJRange(s, i, jLoopS, jLoopN);
+        const bool iEdge = (i == 1 || i == cfg.numCellsX);
+        for (int j = jLoopS; j <= jLoopN; ++j) {
+            const bool corner = iEdge && (j == s.jLow[i] + 1 || j == s.jHigh[i]);
+            for (int k = 1; k <= nZ; ++k) {
+                if (i == iRef && j == jRef && k == kRef) continue;  // pinned
                 int km = k-1, kp = k+1;
-                if (!solid) { if (k == 1) km = cfg.numCellsZ; if (k == cfg.numCellsZ) kp = 1; }
+                if (!solid) { if (k == 1) km = nZ; if (k == nZ) kp = 1; }
                 const double lap =
                       cX*(s.press(i+1,j,k) - 2.0*s.press(i,j,k) + s.press(i-1,j,k))
                     + cY*(s.press(i,j+1,k) - 2.0*s.press(i,j,k) + s.press(i,j-1,k))
                     + cZ*(s.press(i,j,kp)  - 2.0*s.press(i,j,k) + s.press(i,j,km));
-                res(i,j,k) = s.pressureSource(i,j,k) - lap;
+                (void)corner;   // see the note above on why f stays 1
+                const double f = 1.0;
+                res(i,j,k) = f * s.pressureSource(i,j,k) - lap;
             }
+        }
     }
 }
 
