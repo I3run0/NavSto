@@ -53,6 +53,7 @@ struct Options {
     std::string shape = "RoundedCorner";
     int baseUnit = 40;
     std::string solver = "GaussSeidel";
+    double sorOmega = -1.0;   // <0 = leave SimConfig's default
     int mgPre = 1, mgCoarse = 8, mgPost = 1;
 };
 
@@ -69,6 +70,7 @@ struct Options {
         "                  RoundedCorner|Straight (default: RoundedCorner)\n"
         "  --base-unit N   geometry base unit NN (default: 40)\n"
         "  --solver NAME   GaussSeidel|Multigrid (default: GaussSeidel)\n"
+        "  --omega W       SOR relaxation factor (default: SimConfig's 1.7)\n"
         "  --mg P,C,Q      multigrid pre,coarse,post sweeps (default: 1,8,1)\n";
     std::exit(code);
 }
@@ -104,6 +106,7 @@ Options parseArgs(int argc, char* argv[]) {
         else if (a == "--shape")         o.shape = next("--shape");
         else if (a == "--base-unit")     o.baseUnit = std::stoi(next("--base-unit"));
         else if (a == "--solver")        o.solver = next("--solver");
+        else if (a == "--omega")         o.sorOmega = std::stod(next("--omega"));
         else if (a == "--mg") {
             const std::string v = next("--mg");
             const auto c1 = v.find(','), c2 = v.find(',', c1 + 1);
@@ -245,6 +248,7 @@ void buildState(SimState& s, const Options& o) {
     s.cfg.baseUnit = o.baseUnit;
     s.cfg.pressureSolver = (o.solver == "Multigrid") ? PressureSolver::Multigrid
                                                      : PressureSolver::GaussSeidel;
+    if (o.sorOmega > 0.0) s.cfg.sorOmega = o.sorOmega;
     s.cfg.mgPreSweeps = o.mgPre; s.cfg.mgCoarseSweeps = o.mgCoarse; s.cfg.mgPostSweeps = o.mgPost;
     s.cfg.geometryShape =
           o.shape == "AbruptExpansion"   ? GeometryShape::AbruptExpansion
@@ -289,7 +293,7 @@ int main(int argc, char* argv[])
                      "sumS,sumAbsS,compat_ratio,n_interior,n_boundary\n"
                   << std::scientific << std::setprecision(6);
         const bool mg = (o.solver == "Multigrid");
-        for (int n : {1, 5, 20, 100, 500}) {
+        for (int n : {1, 2, 3, 5, 10, 20, 100, 500}) {
             Options oo = o; oo.numPressureIter = n;
             SimState s; buildState(s, oo);
             // For multigrid, n counts CYCLES, not sweeps.
