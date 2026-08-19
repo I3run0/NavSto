@@ -41,17 +41,20 @@
 
 namespace {
 
-double* uploadField(const Field& f) {
+Real* uploadField(const Field& f) {
     const auto& data = f.data();
-    double* devPtr;
-    CUDA_CHECK(cudaMalloc(&devPtr, data.size() * sizeof(double)));
-    CUDA_CHECK(cudaMemcpy(devPtr, data.data(), data.size() * sizeof(double), cudaMemcpyHostToDevice));
+    Real* devPtr;
+    CUDA_CHECK(cudaMalloc(&devPtr, data.size() * sizeof(Real)));
+    // Host fields are double, device fields are Real. Stage the narrowing
+    // here: this runs once per field at startup, not per step.
+    std::vector<Real> staged(data.begin(), data.end());
+    CUDA_CHECK(cudaMemcpy(devPtr, staged.data(), staged.size() * sizeof(Real), cudaMemcpyHostToDevice));
     return devPtr;
 }
 
-double* allocField(long long n) {
-    double* p;
-    CUDA_CHECK(cudaMalloc(&p, n * sizeof(double)));
+Real* allocField(long long n) {
+    Real* p;
+    CUDA_CHECK(cudaMalloc(&p, n * sizeof(Real)));
     return p;
 }
 
@@ -185,8 +188,10 @@ DeviceState buildDeviceState(SimState& s) {
 }
 
 void downloadFields(const DeviceState& d, SimState& s) {
-    auto dl = [&](double* dev, GridField<>& f) {
-        CUDA_CHECK(cudaMemcpy(f.data().data(), dev, d.fieldLen * sizeof(double), cudaMemcpyDeviceToHost));
+    std::vector<Real> staged(static_cast<std::size_t>(d.fieldLen));
+    auto dl = [&](Real* dev, GridField<>& f) {
+        CUDA_CHECK(cudaMemcpy(staged.data(), dev, d.fieldLen * sizeof(Real), cudaMemcpyDeviceToHost));
+        std::copy(staged.begin(), staged.end(), f.data().begin());
     };
     dl(d.velX, s.velX); dl(d.velY, s.velY); dl(d.velZ, s.velZ);
     dl(d.press, s.press);
@@ -220,25 +225,25 @@ __global__ void xSweepKernel(DeviceState d) {
     const int k = 1 + (int)(tid % KKfim);
 
     const long long base = ((long long)(j - 1) * d.numCellsZ + (k - 1)) * d.scratchLen;
-    double* ppie = d.ppieX + base; double* ppiw = d.ppiwX + base; double* qsie = d.qsieX + base;
-    double* Ku = d.KuX + base; double* Kv = d.KvX + base; double* Kw = d.KwX + base;
+    Real* ppie = d.ppieX + base; Real* ppiw = d.ppiwX + base; Real* qsie = d.qsieX + base;
+    Real* Ku = d.KuX + base; Real* Kv = d.KvX + base; Real* Kw = d.KwX + base;
 
     const int iStart = d.iLow[j];
     const int iEnd = d.iHigh[j];
-    const double invDx2 = 1.0 / (d.cellSizeX * d.cellSizeX);
+    const Real invDx2 = 1.0 / (d.cellSizeX * d.cellSizeX);
 
     for (int i = iStart; i <= iEnd - 1; ++i) {
-        const double localRe = 1.0 / effectiveInvRe(d, i);
-        const double uFace = 0.5 * (VELX(d, i + 1, j, k) + VELX(d, i, j, k));
-        const double DPe = localRe * uFace * d.cellSizeX;
-        double pip, cip, cim;
+        const Real localRe = 1.0 / effectiveInvRe(d, i);
+        const Real uFace = 0.5 * (VELX(d, i + 1, j, k) + VELX(d, i, j, k));
+        const Real DPe = localRe * uFace * d.cellSizeX;
+        Real pip, cip, cim;
         computeExponentialWeights(localRe, DPe, pip, cip, cim);
         ppie[i + 1 + 1] = cip;
         ppiw[i + 1 + 1 + 1] = cim;
-        qsie[i + 1 + 1] = computeQsi(DPe, pip, 0.5);
+        qsie[i + 1 + 1] = computeQsi(DPe, pip, Real(0.5));
     }
     for (int i = iStart + 1; i <= iEnd - 1; ++i) {
-        const double coeff = invDx2;
+        const Real coeff = invDx2;
         ACCX(d, i, j, k) += (ppie[i + 1 + 1] * (VELX(d, i + 1, j, k) - VELX(d, i, j, k))
                             + ppiw[i + 1 + 1] * (VELX(d, i - 1, j, k) - VELX(d, i, j, k))) * coeff;
         ACCY(d, i, j, k) += (ppie[i + 1 + 1] * (VELY(d, i + 1, j, k) - VELY(d, i, j, k))
@@ -247,10 +252,10 @@ __global__ void xSweepKernel(DeviceState d) {
                             + ppiw[i + 1 + 1] * (VELZ(d, i - 1, j, k) - VELZ(d, i, j, k))) * coeff;
     }
     for (int i = iStart + 1; i <= iEnd - 1; ++i) {
-        const double localRe = 1.0 / effectiveInvRe(d, i);
-        const double uCell = VELX(d, i, j, k);
-        const double DPe = localRe * uCell * d.cellSizeX;
-        double pip, cip, cim;
+        const Real localRe = 1.0 / effectiveInvRe(d, i);
+        const Real uCell = VELX(d, i, j, k);
+        const Real DPe = localRe * uCell * d.cellSizeX;
+        Real pip, cip, cim;
         computeExponentialWeights(localRe, DPe, pip, cip, cim);
         cip *= invDx2; cim *= invDx2;
         Ku[i + 1 + 1] = cip * (VELX(d, i, j, k) - VELX(d, i + 1, j, k)) + cim * (VELX(d, i, j, k) - VELX(d, i - 1, j, k));
@@ -284,24 +289,24 @@ __global__ void ySweepKernel(DeviceState d) {
     const int k = 1 + (int)(tid % KKfim);
 
     const long long base = ((long long)(i - 1) * d.numCellsZ + (k - 1)) * d.scratchLen;
-    double* ppin = d.ppinY + base; double* ppis = d.ppisY + base; double* qsin = d.qsinY + base;
-    double* Ku = d.KuY + base; double* Kv = d.KvY + base; double* Kw = d.KwY + base;
-    auto VM = [](double* buf, int li) -> double& { return buf[li + 1]; };
+    Real* ppin = d.ppinY + base; Real* ppis = d.ppisY + base; Real* qsin = d.qsinY + base;
+    Real* Ku = d.KuY + base; Real* Kv = d.KvY + base; Real* Kw = d.KwY + base;
+    auto VM = [](Real* buf, int li) -> Real& { return buf[li + 1]; };
 
     const int jStart = d.jLow[i];
     const int jEnd = d.jHigh[i];
-    const double invDy2 = 1.0 / (d.cellSizeY * d.cellSizeY);
-    const double localRe = 1.0 / effectiveInvRe(d, i);
+    const Real invDy2 = 1.0 / (d.cellSizeY * d.cellSizeY);
+    const Real localRe = 1.0 / effectiveInvRe(d, i);
 
     for (int j = jStart; j <= jEnd - 1; ++j) {
-        const double vFace = 0.5 * (VELY(d, i, j + 1, k) + VELY(d, i, j, k));
-        const double DPe = localRe * vFace * d.cellSizeY;
-        double pip, cin, cis;
+        const Real vFace = 0.5 * (VELY(d, i, j + 1, k) + VELY(d, i, j, k));
+        const Real DPe = localRe * vFace * d.cellSizeY;
+        Real pip, cin, cis;
         computeExponentialWeights(localRe, DPe, pip, cin, cis);
-        VM(ppin, j + 1) = cin; VM(ppis, j + 2) = cis; VM(qsin, j + 1) = computeQsi(DPe, pip, 0.5);
+        VM(ppin, j + 1) = cin; VM(ppis, j + 2) = cis; VM(qsin, j + 1) = computeQsi(DPe, pip, Real(0.5));
     }
     for (int j = jStart + 1; j <= jEnd - 1; ++j) {
-        const double coeff = invDy2;
+        const Real coeff = invDy2;
         ACCX(d, i, j, k) += (VM(ppin, j + 1) * (VELX(d, i, j + 1, k) - VELX(d, i, j, k))
                             + VM(ppis, j + 1) * (VELX(d, i, j - 1, k) - VELX(d, i, j, k))) * coeff;
         ACCY(d, i, j, k) += (VM(ppin, j + 1) * (VELY(d, i, j + 1, k) - VELY(d, i, j, k))
@@ -310,9 +315,9 @@ __global__ void ySweepKernel(DeviceState d) {
                             + VM(ppis, j + 1) * (VELZ(d, i, j - 1, k) - VELZ(d, i, j, k))) * coeff;
     }
     for (int j = jStart + 1; j <= jEnd - 1; ++j) {
-        const double vCell = VELY(d, i, j, k);
-        const double DPe = localRe * vCell * d.cellSizeY;
-        double pip, cin, cis;
+        const Real vCell = VELY(d, i, j, k);
+        const Real DPe = localRe * vCell * d.cellSizeY;
+        Real pip, cin, cis;
         computeExponentialWeights(localRe, DPe, pip, cin, cis);
         cin *= invDy2; cis *= invDy2;
         VM(Ku, j + 1) = cin * (VELX(d, i, j, k) - VELX(d, i, j + 1, k)) + cis * (VELX(d, i, j, k) - VELX(d, i, j - 1, k));
@@ -347,25 +352,25 @@ __global__ void zSweepKernel(DeviceState d) {
 
     const int KKfim = d.periodic ? d.numCellsZ : d.numCellsZm1;
     const long long base = tid * d.scratchLen;
-    double* ppiu = d.ppiuZ + base; double* ppid = d.ppidZ + base; double* qsiu = d.qsiuZ + base;
-    double* Ku = d.KuZ + base; double* Kv = d.KvZ + base; double* Kw = d.KwZ + base;
-    auto VM = [](double* buf, int li) -> double& { return buf[li + 1]; };
+    Real* ppiu = d.ppiuZ + base; Real* ppid = d.ppidZ + base; Real* qsiu = d.qsiuZ + base;
+    Real* Ku = d.KuZ + base; Real* Kv = d.KvZ + base; Real* Kw = d.KwZ + base;
+    auto VM = [](Real* buf, int li) -> Real& { return buf[li + 1]; };
 
-    const double invDz2 = 1.0 / (d.cellSizeZ * d.cellSizeZ);
-    const double localRe = 1.0 / effectiveInvRe(d, i);
+    const Real invDz2 = 1.0 / (d.cellSizeZ * d.cellSizeZ);
+    const Real localRe = 1.0 / effectiveInvRe(d, i);
 
     for (int k = 0; k <= KKfim; ++k) {
         const int kp = (d.periodic && k == d.numCellsZ) ? 1 : k + 1;
-        const double wFace = 0.5 * (VELZ(d, i, j, kp) + VELZ(d, i, j, k));
-        const double DPe = localRe * wFace * d.cellSizeZ;
-        double pip, ciu, cid;
+        const Real wFace = 0.5 * (VELZ(d, i, j, kp) + VELZ(d, i, j, k));
+        const Real DPe = localRe * wFace * d.cellSizeZ;
+        Real pip, ciu, cid;
         computeExponentialWeights(localRe, DPe, pip, ciu, cid);
-        VM(ppiu, k + 1) = ciu; VM(ppid, kp + 1) = cid; VM(qsiu, k + 1) = computeQsi(DPe, pip, 0.5);
+        VM(ppiu, k + 1) = ciu; VM(ppid, kp + 1) = cid; VM(qsiu, k + 1) = computeQsi(DPe, pip, Real(0.5));
     }
     for (int k = 1; k <= KKfim; ++k) {
         const int kp = (d.periodic && k == d.numCellsZ) ? 1 : k + 1;
         const int km = (d.periodic && k == 1) ? d.numCellsZ : k - 1;
-        const double coeff = invDz2;
+        const Real coeff = invDz2;
         ACCX(d, i, j, k) += (VM(ppiu, k + 1) * (VELX(d, i, j, kp) - VELX(d, i, j, k))
                             + VM(ppid, k + 1) * (VELX(d, i, j, km) - VELX(d, i, j, k))) * coeff;
         ACCY(d, i, j, k) += (VM(ppiu, k + 1) * (VELY(d, i, j, kp) - VELY(d, i, j, k))
@@ -376,9 +381,9 @@ __global__ void zSweepKernel(DeviceState d) {
     for (int k = 1; k <= KKfim; ++k) {
         const int kp = (d.periodic && k == d.numCellsZ) ? 1 : k + 1;
         const int km = (d.periodic && k == 1) ? d.numCellsZ : k - 1;
-        const double wCell = VELZ(d, i, j, k);
-        const double DPe = localRe * wCell * d.cellSizeZ;
-        double pip, ciu, cid;
+        const Real wCell = VELZ(d, i, j, k);
+        const Real DPe = localRe * wCell * d.cellSizeZ;
+        Real pip, ciu, cid;
         computeExponentialWeights(localRe, DPe, pip, ciu, cid);
         ciu *= invDz2; cid *= invDz2;
         VM(Ku, k + 1) = ciu * (VELX(d, i, j, k) - VELX(d, i, j, kp)) + cid * (VELX(d, i, j, k) - VELX(d, i, j, km));
@@ -413,9 +418,9 @@ __global__ void zSweepKernel(DeviceState d) {
 }
 
 void computeAccelerationsCuda(DeviceState& d) {
-    CUDA_CHECK(cudaMemset(d.accelX, 0, d.fieldLen * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d.accelY, 0, d.fieldLen * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d.accelZ, 0, d.fieldLen * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d.accelX, 0, d.fieldLen * sizeof(Real)));
+    CUDA_CHECK(cudaMemset(d.accelY, 0, d.fieldLen * sizeof(Real)));
+    CUDA_CHECK(cudaMemset(d.accelZ, 0, d.fieldLen * sizeof(Real)));
 
     xSweepKernel<<<gridFor((long long)d.numCellsYm1 * (d.periodic ? d.numCellsZ : d.numCellsZm1)), CUDA_BLOCK>>>(d);
     ySweepKernel<<<gridFor((long long)d.numCellsXm1 * (d.periodic ? d.numCellsZ : d.numCellsZm1)), CUDA_BLOCK>>>(d);
@@ -451,7 +456,7 @@ __global__ void zeroBoundaryJKKernel(DeviceState d) {
     ACCZ(d, iL, j, k) = 0.0; ACCZ(d, iR, j, k) = 0.0;
 }
 
-__global__ void pressureSourceKernel(DeviceState d, double invDt) {
+__global__ void pressureSourceKernel(DeviceState d, Real invDt) {
     const long long total = (long long)d.numCellsX * (d.numCellsY + 1) * d.numCellsZ;
     const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     if (tid >= total) return;
@@ -468,25 +473,25 @@ __global__ void pressureSourceKernel(DeviceState d, double invDt) {
     int km = k - 1;
     if (d.periodic && k == 1) km = d.numCellsZ;
 
-    const double qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
+    const Real qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
 
-    const double divU = (VELX(d,i,j,k)-VELX(d,im,j,k)+VELX(d,i,jm,k)-VELX(d,im,jm,k)
+    const Real divU = (VELX(d,i,j,k)-VELX(d,im,j,k)+VELX(d,i,jm,k)-VELX(d,im,jm,k)
                         + VELX(d,i,j,km)-VELX(d,im,j,km)+VELX(d,i,jm,km)-VELX(d,im,jm,km)) * qInvDx;
-    const double divV = (VELY(d,i,j,k)-VELY(d,i,jm,k)+VELY(d,im,j,k)-VELY(d,im,jm,k)
+    const Real divV = (VELY(d,i,j,k)-VELY(d,i,jm,k)+VELY(d,im,j,k)-VELY(d,im,jm,k)
                         + VELY(d,i,j,km)-VELY(d,i,jm,km)+VELY(d,im,j,km)-VELY(d,im,jm,km)) * qInvDy;
-    const double divW = (VELZ(d,i,j,k)+VELZ(d,i,jm,k)+VELZ(d,im,j,k)+VELZ(d,im,jm,k)
+    const Real divW = (VELZ(d,i,j,k)+VELZ(d,i,jm,k)+VELZ(d,im,j,k)+VELZ(d,im,jm,k)
                         - VELZ(d,i,j,km)-VELZ(d,i,jm,km)-VELZ(d,im,j,km)-VELZ(d,im,jm,km)) * qInvDz;
-    const double divAu = (ACCX(d,i,j,k)-ACCX(d,im,j,k)+ACCX(d,i,jm,k)-ACCX(d,im,jm,k)
+    const Real divAu = (ACCX(d,i,j,k)-ACCX(d,im,j,k)+ACCX(d,i,jm,k)-ACCX(d,im,jm,k)
                         + ACCX(d,i,j,km)-ACCX(d,im,j,km)+ACCX(d,i,jm,km)-ACCX(d,im,jm,km)) * qInvDx;
-    const double divAv = (ACCY(d,i,j,k)-ACCY(d,i,jm,k)+ACCY(d,im,j,k)-ACCY(d,im,jm,k)
+    const Real divAv = (ACCY(d,i,j,k)-ACCY(d,i,jm,k)+ACCY(d,im,j,k)-ACCY(d,im,jm,k)
                         + ACCY(d,i,j,km)-ACCY(d,i,jm,km)+ACCY(d,im,j,km)-ACCY(d,im,jm,km)) * qInvDy;
-    const double divAw = (ACCZ(d,i,j,k)+ACCZ(d,i,jm,k)+ACCZ(d,im,j,k)+ACCZ(d,im,jm,k)
+    const Real divAw = (ACCZ(d,i,j,k)+ACCZ(d,i,jm,k)+ACCZ(d,im,j,k)+ACCZ(d,im,jm,k)
                         - ACCZ(d,i,j,km)-ACCZ(d,i,jm,km)-ACCZ(d,im,j,km)-ACCZ(d,im,jm,km)) * qInvDz;
 
     PSRC(d, i, j, k) = (divU + divV + divW) * invDt + (divAu + divAv + divAw);
 }
 
-void buildPressureSourceCuda(DeviceState& d, double timeStepSize) {
+void buildPressureSourceCuda(DeviceState& d, Real timeStepSize) {
     zeroBoundaryIKKernel<<<gridFor((long long)(d.numCellsX+1)*(d.numCellsZ+1)), CUDA_BLOCK>>>(d);
     zeroBoundaryJKKernel<<<gridFor((long long)(d.numCellsY+1)*(d.numCellsZ+1)), CUDA_BLOCK>>>(d);
     pressureSourceKernel<<<gridFor((long long)d.numCellsX*(d.numCellsY+1)*d.numCellsZ), CUDA_BLOCK>>>(d, 1.0 / timeStepSize);
@@ -546,7 +551,7 @@ __global__ void mirrorGhostCellsSameRowKernel(DeviceState d) {
 }
 
 __global__ void updateColorKernel(DeviceState d, const DeviceCellIndex* cells, int n,
-                                   double cX, double cY, double cZ, double invDiag, double pRef) {
+                                   Real cX, Real cY, Real cZ, Real invDiag, Real pRef) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     const DeviceCellIndex c = cells[idx];
@@ -562,7 +567,7 @@ __global__ void updateColorKernel(DeviceState d, const DeviceCellIndex* cells, i
         PRES(d, i, j, k) = pRef;
         return;
     }
-    double pNew = (cY * (PRES(d,i,jp,k) + PRES(d,i,jm,k))
+    Real pNew = (cY * (PRES(d,i,jp,k) + PRES(d,i,jm,k))
                  + cX * (PRES(d,ip,j,k) + PRES(d,im,j,k))
                  + cZ * (PRES(d,i,j,kp) + PRES(d,i,j,km))
                  - PSRC(d,i,j,k)) * invDiag;
@@ -575,11 +580,11 @@ __global__ void updateColorKernel(DeviceState d, const DeviceCellIndex* cells, i
 }
 
 void solvePressurePoissonCuda(DeviceState& d) {
-    const double cX = 1.0 / d.cellSizeXsq, cY = 1.0 / d.cellSizeYsq, cZ = 1.0 / d.cellSizeZsq;
-    const double invDiag = 0.5 / (cX + cY + cZ);
+    const Real cX = 1.0 / d.cellSizeXsq, cY = 1.0 / d.cellSizeYsq, cZ = 1.0 / d.cellSizeZsq;
+    const Real invDiag = 0.5 / (cX + cY + cZ);
 
-    double pRef;
-    CUDA_CHECK(cudaMemcpy(&pRef, d.press + d.idx(d.iRef, d.jRef, d.kRef), sizeof(double), cudaMemcpyDeviceToHost));
+    Real pRef;
+    CUDA_CHECK(cudaMemcpy(&pRef, d.press + d.idx(d.iRef, d.jRef, d.kRef), sizeof(Real), cudaMemcpyDeviceToHost));
 
     for (int sweep = 0; sweep < d.numPressureIter; ++sweep) {
         mirrorGhostCellsCrossRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
@@ -596,7 +601,7 @@ void solvePressurePoissonCuda(DeviceState& d) {
 //  updateVelocities
 // ═════════════════════════════════════════════════════════════════════════
 
-__global__ void updateVelocitiesKernel(DeviceState d, double dtEff) {
+__global__ void updateVelocitiesKernel(DeviceState d, Real dtEff) {
     const long long total = (long long)d.numCellsXm1 * (d.numCellsY + 1) * d.numCellsZ;
     const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     if (tid >= total) return;
@@ -609,18 +614,18 @@ __global__ void updateVelocitiesKernel(DeviceState d, double dtEff) {
     if (i > d.numCellsXm1 || j < d.jLow[i] + 1 || j > d.jHigh[i] - 1 || k > KKfim) return;
     const int ip = i + 1, jp = j + 1;
     const int kp = (k < d.numCellsZ) ? k + 1 : 1;
-    const double qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
+    const Real qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
 
-    const double dpu = (PRES(d,ip,j,kp)-PRES(d,i,j,kp)+PRES(d,ip,jp,kp)-PRES(d,i,jp,kp)
+    const Real dpu = (PRES(d,ip,j,kp)-PRES(d,i,j,kp)+PRES(d,ip,jp,kp)-PRES(d,i,jp,kp)
                        +PRES(d,ip,j,k) -PRES(d,i,j,k) +PRES(d,ip,jp,k) -PRES(d,i,jp,k)) * qInvDx;
-    const double dpv = (PRES(d,i,jp,kp)-PRES(d,i,j,kp)+PRES(d,ip,jp,kp)-PRES(d,ip,j,kp)
+    const Real dpv = (PRES(d,i,jp,kp)-PRES(d,i,j,kp)+PRES(d,ip,jp,kp)-PRES(d,ip,j,kp)
                        +PRES(d,i,jp,k) -PRES(d,i,j,k) +PRES(d,ip,jp,k) -PRES(d,ip,j,k)) * qInvDy;
-    const double dpw = (PRES(d,i,jp,kp)+PRES(d,i,j,kp)+PRES(d,ip,jp,kp)+PRES(d,ip,j,kp)
+    const Real dpw = (PRES(d,i,jp,kp)+PRES(d,i,j,kp)+PRES(d,ip,jp,kp)+PRES(d,ip,j,kp)
                        -PRES(d,i,jp,k) -PRES(d,i,j,k) -PRES(d,ip,jp,k) -PRES(d,ip,j,k)) * qInvDz;
 
-    const double du = ACCX(d,i,j,k) - dpu;
-    const double dv = ACCY(d,i,j,k) - dpv;
-    const double dw = ACCZ(d,i,j,k) - dpw;
+    const Real du = ACCX(d,i,j,k) - dpu;
+    const Real dv = ACCY(d,i,j,k) - dpv;
+    const Real dw = ACCZ(d,i,j,k) - dpw;
 
     VELX(d,i,j,k) += du * dtEff;
     VELY(d,i,j,k) += dv * dtEff;
@@ -661,8 +666,8 @@ __global__ void periodicCopyVelKernel(DeviceState d) {
     VELZ(d,i,j,0) = VELZ(d,i,j,d.numCellsZ);
 }
 
-void updateVelocitiesCuda(DeviceState& d, bool useHalfStep, double timeStepSize) {
-    const double dtEff = useHalfStep ? 0.5 * timeStepSize : timeStepSize;
+void updateVelocitiesCuda(DeviceState& d, bool useHalfStep, Real timeStepSize) {
+    const Real dtEff = useHalfStep ? 0.5 * timeStepSize : timeStepSize;
     updateVelocitiesKernel<<<gridFor(d.maxCellDomain), CUDA_BLOCK>>>(d, dtEff);
 
     outletBCKernel<<<gridFor((long long)(d.numCellsY+2)*(d.numCellsZ+2)), CUDA_BLOCK>>>(d, !d.outletZeroFirstDeriv);
@@ -689,31 +694,36 @@ __global__ void momentumResidualKernel(DeviceState d) {
 
     const int ip = i + 1, jp = j + 1;
     const int kp = (k < d.numCellsZ) ? k + 1 : 1;
-    const double qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
+    const Real qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
 
-    const double gradPx = (PRES(d,ip,j,k)-PRES(d,i,j,k)+PRES(d,ip,jp,k)-PRES(d,i,jp,k)
+    const Real gradPx = (PRES(d,ip,j,k)-PRES(d,i,j,k)+PRES(d,ip,jp,k)-PRES(d,i,jp,k)
                           + PRES(d,ip,j,kp)-PRES(d,i,j,kp)+PRES(d,ip,jp,kp)-PRES(d,i,jp,kp)) * qInvDx;
-    const double gradPy = (PRES(d,i,jp,k)-PRES(d,i,j,k)+PRES(d,ip,jp,k)-PRES(d,ip,j,k)
+    const Real gradPy = (PRES(d,i,jp,k)-PRES(d,i,j,k)+PRES(d,ip,jp,k)-PRES(d,ip,j,k)
                           + PRES(d,i,jp,kp)-PRES(d,i,j,kp)+PRES(d,ip,jp,kp)-PRES(d,ip,j,kp)) * qInvDy;
-    const double gradPz = (-PRES(d,i,jp,k)-PRES(d,i,j,k)-PRES(d,ip,jp,k)-PRES(d,ip,j,k)
+    const Real gradPz = (-PRES(d,i,jp,k)-PRES(d,i,j,k)-PRES(d,ip,jp,k)-PRES(d,ip,j,k)
                           + PRES(d,i,jp,kp)+PRES(d,i,j,kp)+PRES(d,ip,jp,kp)+PRES(d,ip,j,kp)) * qInvDz;
 
-    const double resU = ACCX(d,i,j,k) - gradPx;
-    const double resV = ACCY(d,i,j,k) - gradPy;
-    const double resW = ACCZ(d,i,j,k) - gradPz;
+    const Real resU = ACCX(d,i,j,k) - gradPx;
+    const Real resV = ACCY(d,i,j,k) - gradPy;
+    const Real resW = ACCZ(d,i,j,k) - gradPz;
     SCRATCH(d, i, j, k) = sqrt(resU*resU + resV*resV + resW*resW);
 }
 
-struct SquareFunctor { __device__ double operator()(double v) const { return v * v; } };
-struct AbsFunctor    { __device__ double operator()(double v) const { return fabs(v); } };
+// Max reductions run in Real -- a maximum is exact at any precision. SUMS stay
+// in double on purpose: these accumulate over ~2.7M cells, and a float
+// accumulator loses far more to cancellation than the device gains from the
+// narrower type. The functors below therefore widen for the sum paths.
+struct SquareFunctor { __device__ double operator()(Real v) const { return double(v) * double(v); } };
+struct AbsFunctor    { __device__ double operator()(Real v) const { return fabs(double(v)); } };
+struct AbsFunctorR   { __device__ Real   operator()(Real v) const { return fabs(v); } };
 
 void computeMomentumResidualCuda(DeviceState& d, double& residMax, double& residRMS) {
-    CUDA_CHECK(cudaMemset(d.scratchField, 0, d.fieldLen * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d.scratchField, 0, d.fieldLen * sizeof(Real)));
     momentumResidualKernel<<<gridFor(d.maxCellDomain), CUDA_BLOCK>>>(d);
     CUDA_CHECK(cudaGetLastError());
 
-    thrust::device_ptr<double> sf(d.scratchField);
-    residMax = thrust::reduce(thrust::device, sf, sf + d.fieldLen, 0.0, thrust::maximum<double>());
+    thrust::device_ptr<Real> sf(d.scratchField);
+    residMax = thrust::reduce(thrust::device, sf, sf + d.fieldLen, Real(0), thrust::maximum<Real>());
     const double sumSq = thrust::transform_reduce(thrust::device, sf, sf + d.fieldLen, SquareFunctor(), 0.0, thrust::plus<double>());
     residRMS = (d.residCellCount > 0) ? std::sqrt(sumSq / (double)d.residCellCount) : 0.0;
 }
@@ -737,9 +747,9 @@ __global__ void divergenceKernel(DeviceState d) {
 
     const int im = i - 1, jm = j - 1;
     const int km = (d.periodic && k == 1) ? d.numCellsZ : k - 1;
-    const double qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
+    const Real qInvDx = 0.25 / d.cellSizeX, qInvDy = 0.25 / d.cellSizeY, qInvDz = 0.25 / d.cellSizeZ;
 
-    const double div = (VELX(d,i,j,k)-VELX(d,im,j,k)+VELX(d,i,jm,k)-VELX(d,im,jm,k)
+    const Real div = (VELX(d,i,j,k)-VELX(d,im,j,k)+VELX(d,i,jm,k)-VELX(d,im,jm,k)
                        + VELX(d,i,j,km)-VELX(d,im,j,km)+VELX(d,i,jm,km)-VELX(d,im,jm,km)) * qInvDx
                       + (VELY(d,i,j,k)-VELY(d,i,jm,k)+VELY(d,im,j,k)-VELY(d,im,jm,k)
                        + VELY(d,i,j,km)-VELY(d,i,jm,km)+VELY(d,im,j,km)-VELY(d,im,jm,km)) * qInvDy
@@ -750,16 +760,16 @@ __global__ void divergenceKernel(DeviceState d) {
 }
 
 void computeDivergenceCuda(DeviceState& d, double& dilatationMax, double& intDivergence, double& intAbsDivergence) {
-    CUDA_CHECK(cudaMemset(d.divScratch, 0, d.fieldLen * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d.divScratch, 0, d.fieldLen * sizeof(Real)));
     divergenceKernel<<<gridFor((long long)d.numCellsX*(d.numCellsY+1)*d.numCellsZ), CUDA_BLOCK>>>(d);
     CUDA_CHECK(cudaGetLastError());
 
-    thrust::device_ptr<double> dv(d.divScratch);
+    thrust::device_ptr<Real> dv(d.divScratch);
     intDivergence = thrust::reduce(thrust::device, dv, dv + d.fieldLen, 0.0, thrust::plus<double>());
     intAbsDivergence = thrust::transform_reduce(thrust::device, dv, dv + d.fieldLen, AbsFunctor(), 0.0, thrust::plus<double>());
-    dilatationMax = thrust::transform_reduce(thrust::device, dv, dv + d.fieldLen, AbsFunctor(), 0.0, thrust::maximum<double>());
+    dilatationMax = thrust::transform_reduce(thrust::device, dv, dv + d.fieldLen, AbsFunctorR(), Real(0), thrust::maximum<Real>());
 
-    const double cellVol = d.cellSizeX * d.cellSizeY * d.cellSizeZ;
+    const Real cellVol = d.cellSizeX * d.cellSizeY * d.cellSizeZ;
     intDivergence *= cellVol;
     intAbsDivergence *= cellVol;
 }
@@ -768,7 +778,7 @@ void computeDivergenceCuda(DeviceState& d, double& dilatationMax, double& intDiv
 //  adaptTimeStep
 // ═════════════════════════════════════════════════════════════════════════
 
-__global__ void velMaxKernel(DeviceState d, double* uMax, double* vMax, double* wMax) {
+__global__ void velMaxKernel(DeviceState d, Real* uMax, Real* vMax, Real* wMax) {
     const long long total = (long long)d.numCellsXm1 * (d.numCellsY + 1) * d.numCellsZ;
     const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     if (tid >= total) return;
@@ -790,14 +800,14 @@ void adaptTimeStepCuda(DeviceState& d, double& timeStepSize) {
     velMaxKernel<<<gridFor(d.maxCellDomain), CUDA_BLOCK>>>(d, d.cellScratch1, d.cellScratch2, d.cellScratch3);
     CUDA_CHECK(cudaGetLastError());
 
-    thrust::device_ptr<double> u(d.cellScratch1), v(d.cellScratch2), w(d.cellScratch3);
-    const double uMax = thrust::reduce(thrust::device, u, u + d.maxCellDomain, 0.0, thrust::maximum<double>());
-    const double vMax = thrust::reduce(thrust::device, v, v + d.maxCellDomain, 0.0, thrust::maximum<double>());
-    const double wMax = thrust::reduce(thrust::device, w, w + d.maxCellDomain, 0.0, thrust::maximum<double>());
+    thrust::device_ptr<Real> u(d.cellScratch1), v(d.cellScratch2), w(d.cellScratch3);
+    const Real uMax = thrust::reduce(thrust::device, u, u + d.maxCellDomain, Real(0), thrust::maximum<Real>());
+    const Real vMax = thrust::reduce(thrust::device, v, v + d.maxCellDomain, Real(0), thrust::maximum<Real>());
+    const Real wMax = thrust::reduce(thrust::device, w, w + d.maxCellDomain, Real(0), thrust::maximum<Real>());
 
-    const double reForDiff = (d.hyperViscousStart == 0) ? d.reynoldsNumber : d.hyperViscousRe;
-    const double dtViscous = 0.5 * reForDiff / (1.0/d.cellSizeXsq + 1.0/d.cellSizeYsq + 1.0/d.cellSizeZsq);
-    const double dtAdv = std::min({d.cellSizeX / (uMax + 1e-30),
+    const Real reForDiff = (d.hyperViscousStart == 0) ? d.reynoldsNumber : d.hyperViscousRe;
+    const Real dtViscous = 0.5 * reForDiff / (1.0/d.cellSizeXsq + 1.0/d.cellSizeYsq + 1.0/d.cellSizeZsq);
+    const Real dtAdv = std::min({d.cellSizeX / (uMax + 1e-30),
                                     d.cellSizeY / (vMax + 1e-30),
                                     d.cellSizeZ / (wMax + 1e-30)});
     timeStepSize = 0.35 * std::min(dtViscous, dtAdv);

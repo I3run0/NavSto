@@ -13,6 +13,8 @@
 #include "SimState.hpp"
 #include "Geometry.hpp"
 
+// Real (the device element type) comes from BackendConfig.hpp.
+
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
@@ -44,12 +46,12 @@ struct DeviceState {
     long long fieldLen = 0;         // sI*sJ*sK — length of every field array
 
     // ── Fields (flat, same layout as GridField) ─────────────────────────
-    double *velX = nullptr, *velY = nullptr, *velZ = nullptr;
-    double *press = nullptr;
-    double *accelX = nullptr, *accelY = nullptr, *accelZ = nullptr;
-    double *pressureSource = nullptr;
-    double *scratchField = nullptr;      // also doubles as MomentumResidual VTK field
-    double *divScratch = nullptr;        // transient per-cell divergence (computeDivergence)
+    Real *velX = nullptr, *velY = nullptr, *velZ = nullptr;
+    Real *press = nullptr;
+    Real *accelX = nullptr, *accelY = nullptr, *accelZ = nullptr;
+    Real *pressureSource = nullptr;
+    Real *scratchField = nullptr;      // also doubles as MomentumResidual VTK field
+    Real *divScratch = nullptr;        // transient per-cell divergence (computeDivergence)
 
     // ── Geometry index arrays (device copies of s.iLow/iHigh/jLow/jHigh) ──
     int *iLow = nullptr, *iHigh = nullptr;   // length sJ
@@ -65,40 +67,40 @@ struct DeviceState {
     //  X-sweep: thread = (j,k) pair, recurrence over i.
     //  Y-sweep: thread = (i,k) pair, recurrence over j.
     //  Z-sweep: thread = (i,j) pair, recurrence over k.
-    double *ppieX = nullptr, *ppiwX = nullptr, *qsieX = nullptr;
-    double *KuX = nullptr, *KvX = nullptr, *KwX = nullptr;
+    Real *ppieX = nullptr, *ppiwX = nullptr, *qsieX = nullptr;
+    Real *KuX = nullptr, *KvX = nullptr, *KwX = nullptr;
     int scratchLen = 0;          // per-thread slice length (maxDim+3, shared by all three sweeps)
     int numThreadsX = 0, numThreadsY = 0, numThreadsZ = 0;   // upper-bound slice counts
 
-    double *ppinY = nullptr, *ppisY = nullptr, *qsinY = nullptr;
-    double *KuY = nullptr, *KvY = nullptr, *KwY = nullptr;
+    Real *ppinY = nullptr, *ppisY = nullptr, *qsinY = nullptr;
+    Real *KuY = nullptr, *KvY = nullptr, *KwY = nullptr;
 
-    double *ppiuZ = nullptr, *ppidZ = nullptr, *qsiuZ = nullptr;
-    double *KuZ = nullptr, *KvZ = nullptr, *KwZ = nullptr;
+    Real *ppiuZ = nullptr, *ppidZ = nullptr, *qsiuZ = nullptr;
+    Real *KuZ = nullptr, *KvZ = nullptr, *KwZ = nullptr;
 
     // ── RK4 bookkeeping buffers. Allocated by backendStartup() and only for
     //  cfg.flowType == RK4Transient; null on every steady-marching run. ────
-    double *rk4VelX0 = nullptr, *rk4VelY0 = nullptr, *rk4VelZ0 = nullptr;
-    double *rk4Ku = nullptr, *rk4Kv = nullptr, *rk4Kw = nullptr;
+    Real *rk4VelX0 = nullptr, *rk4VelY0 = nullptr, *rk4VelZ0 = nullptr;
+    Real *rk4Ku = nullptr, *rk4Kv = nullptr, *rk4Kw = nullptr;
 
     // ── Generic reusable reduction scratch (updateVelocities' maxChange,
     //  adaptTimeStep's per-component max) — sized to the largest per-cell
     //  upper-bound domain used anywhere (numCellsXm1*(numCellsY+1)*numCellsZ),
     //  reused sequentially across calls (never live concurrently). ─────────
-    double *cellScratch1 = nullptr, *cellScratch2 = nullptr, *cellScratch3 = nullptr;
+    Real *cellScratch1 = nullptr, *cellScratch2 = nullptr, *cellScratch3 = nullptr;
     long long maxCellDomain = 0;
 
     // ── Scalar config every kernel needs (copied by value, no device read) ─
     int numCellsX = 0, numCellsY = 0, numCellsZ = 0;
     int numCellsXm1 = 0, numCellsYm1 = 0, numCellsZm1 = 0;
-    double cellSizeX = 0, cellSizeY = 0, cellSizeZ = 0;
-    double cellSizeXsq = 0, cellSizeYsq = 0, cellSizeZsq = 0;
-    double reynoldsNumber = 0, hyperViscousRe = 0;
+    Real cellSizeX = 0, cellSizeY = 0, cellSizeZ = 0;
+    Real cellSizeXsq = 0, cellSizeYsq = 0, cellSizeZsq = 0;
+    Real reynoldsNumber = 0, hyperViscousRe = 0;
     int hyperViscousStart = 0;
     bool periodic = false;          // lateralCondition == Periodic
     bool solidWall = false;         // lateralCondition == SolidWall
     bool outletZeroFirstDeriv = true;
-    double sorOmega = 1.0;
+    Real sorOmega = 1.0;
     int degreeIndex2 = 0;
     int numPressureIter = 0;
 

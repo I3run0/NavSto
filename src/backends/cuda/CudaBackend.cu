@@ -18,9 +18,9 @@
 
 // ── CUDA physics wrappers (Physics.cu) ──────────────────────────────────────
 void computeAccelerationsCuda(DeviceState& d);
-void buildPressureSourceCuda(DeviceState& d, double timeStepSize);
+void buildPressureSourceCuda(DeviceState& d, Real timeStepSize);
 void solvePressurePoissonCuda(DeviceState& d);
-void updateVelocitiesCuda(DeviceState& d, bool useHalfStep, double timeStepSize);
+void updateVelocitiesCuda(DeviceState& d, bool useHalfStep, Real timeStepSize);
 void computeMomentumResidualCuda(DeviceState& d, double& residMax, double& residRMS);
 void computeDivergenceCuda(DeviceState& d, double& dilatationMax, double& intDivergence, double& intAbsDivergence);
 void adaptTimeStepCuda(DeviceState& d, double& timeStepSize);

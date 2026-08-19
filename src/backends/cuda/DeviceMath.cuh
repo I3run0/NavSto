@@ -15,18 +15,18 @@
 // ── Field accessors (d passed by value into every kernel; these take a
 //    reference to that local copy — the pointers inside still point at
 //    real device memory) ──────────────────────────────────────────────────
-__device__ __forceinline__ double& VELX(DeviceState& d, int i, int j, int k) { return d.velX[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& VELY(DeviceState& d, int i, int j, int k) { return d.velY[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& VELZ(DeviceState& d, int i, int j, int k) { return d.velZ[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& PRES(DeviceState& d, int i, int j, int k) { return d.press[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& ACCX(DeviceState& d, int i, int j, int k) { return d.accelX[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& ACCY(DeviceState& d, int i, int j, int k) { return d.accelY[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& ACCZ(DeviceState& d, int i, int j, int k) { return d.accelZ[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& PSRC(DeviceState& d, int i, int j, int k) { return d.pressureSource[d.idx(i, j, k)]; }
-__device__ __forceinline__ double& SCRATCH(DeviceState& d, int i, int j, int k) { return d.scratchField[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& VELX(DeviceState& d, int i, int j, int k) { return d.velX[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& VELY(DeviceState& d, int i, int j, int k) { return d.velY[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& VELZ(DeviceState& d, int i, int j, int k) { return d.velZ[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& PRES(DeviceState& d, int i, int j, int k) { return d.press[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& ACCX(DeviceState& d, int i, int j, int k) { return d.accelX[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& ACCY(DeviceState& d, int i, int j, int k) { return d.accelY[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& ACCZ(DeviceState& d, int i, int j, int k) { return d.accelZ[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& PSRC(DeviceState& d, int i, int j, int k) { return d.pressureSource[d.idx(i, j, k)]; }
+__device__ __forceinline__ Real& SCRATCH(DeviceState& d, int i, int j, int k) { return d.scratchField[d.idx(i, j, k)]; }
 
 /// DeviceState-flavoured wrapper over SchemeMath.hpp's shared formula.
-__device__ __forceinline__ double effectiveInvRe(const DeviceState& d, int i) {
+__device__ __forceinline__ Real effectiveInvRe(const DeviceState& d, int i) {
     return effectiveInvReAt(i, d.numCellsX, d.hyperViscousStart,
                             d.reynoldsNumber, d.hyperViscousRe);
 }

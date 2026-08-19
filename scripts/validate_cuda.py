@@ -87,7 +87,16 @@ def check_redblack_equivalence():
                                             "serial vs cuda")
 
 
-RK4_TOL = 1e-12
+# Sized off the DEVICE precision, which navsolver_cuda reports in its banner.
+# This check exists to catch real bugs -- it was written for a missing
+# post-combine BC pass that showed as ~1e-3 drift -- so at fp32 it only has to
+# sit below that and above float epsilon (1.19e-7), not at fp64's 1e-12.
+RK4_TOL_BY_PRECISION = {"fp64": 1e-12, "fp32": 1e-5}
+
+
+def device_precision(stdout):
+    """fp32 / fp64, read from the startup banner (see cuda/BackendConfig.hpp)."""
+    return "fp32" if "fp32" in stdout else "fp64"
 
 RK4_CFG_TEMPLATE = """\
 numCellsX = 24
@@ -114,8 +123,8 @@ def check_rk4_equivalence():
 
     Compares against OpenMP rather than serial because both run the same
     red-black SOR, leaving nothing that should legitimately differ -- so the
-    tolerance can be 1e-12 instead of the 1e-2 the gauge-fixed serial
-    comparison needs. That matters: the missing post-combine BC pass this
+    tolerance can track the device precision -- 1e-12 at fp64, 1e-5 at fp32 --
+    instead of the 1e-2 the gauge-fixed serial comparison needs. That matters: the missing post-combine BC pass this
     check was written for showed up as a ~1e-3 drift, which any tolerance
     loose enough for a GS-vs-red-black comparison would have passed.
 
@@ -138,11 +147,13 @@ def check_rk4_equivalence():
 
             out_cuda = Path(tmp) / "cuda"
             cfg_path.write_text(RK4_CFG_TEMPLATE.format(out=out_cuda, lateral=lateral))
-            run(NAVSOLVER_CUDA, cfg_path)
+            stdout = run(NAVSOLVER_CUDA, cfg_path)
 
+            prec = device_precision(stdout)
+            tol = RK4_TOL_BY_PRECISION[prec]
             ok = compare_velocity_fields(out_omp / "cuda_rk4_t000010.vtk",
                                           out_cuda / "cuda_rk4_t000010.vtk",
-                                          RK4_TOL, f"lateralBC={lateral}") and ok
+                                          tol, f"lateralBC={lateral} [{prec}]") and ok
     return ok
 
 
