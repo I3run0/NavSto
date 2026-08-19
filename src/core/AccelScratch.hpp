@@ -26,7 +26,14 @@ struct AccelScratch {
     // buf[tid*xk2DLenPerThread + iLogical*scratchKLen + (k-1)]. See
     // docs/serial-optimization-loop-order.md for why 2-D with k innermost
     // (matching GridField's storage order).
-    std::vector<double> ppieXK, ppiwXK, qsieXK, KuXK, KvXK, KwXK;
+    /// Only four (i,k) planes are needed. The fused sweeps produce the east
+    /// coefficient and consume it in the same iteration -- it is a register --
+    /// and the west coefficient is produced one iteration before it is read, so
+    /// a single k-row of history suffices. Those two used to be full planes,
+    /// which cost 2/6 of a 1.01 MB per-thread footprint; at 12 threads that put
+    /// 12.16 MB against a ~12 MB L3 and inverted OpenMP scaling past 4 threads.
+    std::vector<double> qsieXK, KuXK, KvXK, KwXK;
+    std::vector<double> ppiwRow;  ///< west coefficient carried from i-1 (or j-1)
     int scratchKLen = 0;          ///< k-stride within one thread's (i,k) slice
     int xk2DLenPerThread = 0;     ///< one thread's slice length in the XK buffers
 
@@ -58,8 +65,8 @@ struct AccelScratch {
         const std::size_t xk2DLen = padTo8(iLen * static_cast<std::size_t>(scratchKLen));
         xk2DLenPerThread = static_cast<int>(xk2DLen);
         const std::size_t totalXK = xk2DLen * static_cast<std::size_t>(numThreads);
-        ppieXK.assign(totalXK, 0.0); ppiwXK.assign(totalXK, 0.0);
         qsieXK.assign(totalXK, 0.0);
+        ppiwRow.assign(static_cast<std::size_t>(scratchKLen) * numThreads, 0.0);
         KuXK  .assign(totalXK, 0.0); KvXK  .assign(totalXK, 0.0); KwXK.assign(totalXK, 0.0);
     }
 };

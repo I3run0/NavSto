@@ -217,9 +217,8 @@ void computeAccelerations(SimState& s)
         // sweep as (j,k) once X is finished — see the alias block there. The
         // 1-D ppin/ppis/qsin slices these replaced are gone; only the Z sweep
         // still needs 1-D buffers.
-        double* ppieXK = s.ext.accel.ppieXK.data() + tid * s.ext.accel.xk2DLenPerThread;
-        double* ppiwXK = s.ext.accel.ppiwXK.data() + tid * s.ext.accel.xk2DLenPerThread;
         double* qsieXK = s.ext.accel.qsieXK.data() + tid * s.ext.accel.xk2DLenPerThread;
+        double* ppiwRow = s.ext.accel.ppiwRow.data() + tid * s.ext.accel.scratchKLen;
         double* KuXK   = s.ext.accel.KuXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
         double* KvXK   = s.ext.accel.KvXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
         double* KwXK   = s.ext.accel.KwXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
@@ -274,8 +273,7 @@ void computeAccelerations(SimState& s)
                 const double DPe = localRe * uFace * cfg.cellSizeX;
                 double pip, cip, cim;
                 computeExponentialWeights(localRe, DPe, pip, cip, cim);
-                VM2(ppieXK, i+1, k) = cip;      // east coefficient at face i+0.5
-                VM2(ppiwXK, i+1+1, k) = cim;    // west coefficient (ip+1, ip=i+1)
+                ppiwRow[k-1] = cim;             // west coefficient, consumed at i+1
                 VM2(qsieXK, i+1, k) = computeQsi(DPe, pip, 0.5);
             }
         }
@@ -292,14 +290,16 @@ void computeAccelerations(SimState& s)
                 const double DPeFace = localRe * uFace * cfg.cellSizeX;
                 double pipF, cipF, cimF;
                 computeExponentialWeights(localRe, DPeFace, pipF, cipF, cimF);
-                VM2(ppieXK, i+1, k) = cipF;
-                VM2(ppiwXK, i+1+1, k) = cimF;
+                // Read the carried value BEFORE overwriting the slot: this row
+                // holds i-1's west coefficient, and pass 1 is about to replace
+                // it with i+1's.
+                const double ppiw = ppiwRow[k-1];
+                ppiwRow[k-1] = cimF;
+                const double ppie = cipF;                // consumed this iteration
                 VM2(qsieXK, i+1, k) = computeQsi(DPeFace, pipF, 0.5);
 
                 // Pass 2: diffusive part of Au, Av, Aw (first part)
                 const double coeff = invDx2;
-                const double ppie = VM2(ppieXK,i+1,k);   // written just above
-                const double ppiw = VM2(ppiwXK,i+1,k);   // written at i-1
                 s.accelX(i, j, k) += (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
                 s.accelY(i, j, k) += (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
                 s.accelZ(i, j, k) += (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
@@ -350,7 +350,7 @@ void computeAccelerations(SimState& s)
     // scratch widens to (j, k). The 2-D buffers are the X-sweep's, reused --
     // that sweep is complete and its scratch dead by this point, and both
     // dimensions are sized off maxDim, so no extra allocation is needed.
-    double* ppinJK = ppieXK; double* ppisJK = ppiwXK; double* qsinJK = qsieXK;
+    double* qsinJK = qsieXK;
     double* KuJK = KuXK; double* KvJK = KvXK; double* KwJK = KwXK;
 
     const double invDy2 = 1.0 / (cfg.cellSizeY * cfg.cellSizeY);
@@ -374,8 +374,7 @@ void computeAccelerations(SimState& s)
                 const double DPe = localRe * vFace * cfg.cellSizeY;
                 double pip, cin, cis;
                 computeExponentialWeights(localRe, DPe, pip, cin, cis);
-                VM2(ppinJK, j+1, k) = cin;
-                VM2(ppisJK, j+2, k) = cis;
+                ppiwRow[k-1] = cis;             // south coefficient, consumed at j+1
                 VM2(qsinJK, j+1, k) = computeQsi(DPe, pip, 0.5);
             }
         }
@@ -391,14 +390,13 @@ void computeAccelerations(SimState& s)
                 const double DPeFace = localRe * vFace * cfg.cellSizeY;
                 double pipF, cinF, cisF;
                 computeExponentialWeights(localRe, DPeFace, pipF, cinF, cisF);
-                VM2(ppinJK, j+1, k) = cinF;
-                VM2(ppisJK, j+2, k) = cisF;
+                const double ppis = ppiwRow[k-1];        // carried from j-1
+                ppiwRow[k-1] = cisF;                     // for j+1
+                const double ppin = cinF;                // consumed this iteration
                 VM2(qsinJK, j+1, k) = computeQsi(DPeFace, pipF, 0.5);
 
                 // Pass 2: diffusive part of Au, Av, Aw
                 const double coeff = invDy2;
-                const double ppin = VM2(ppinJK,j+1,k);   // written just above
-                const double ppis = VM2(ppisJK,j+1,k);   // written at j-1
                 s.accelX(i, j, k) += (ppin*(vxp-vx0) + ppis*(vxm-vx0)) * coeff;
                 s.accelY(i, j, k) += (ppin*(vyp-vy0) + ppis*(vym-vy0)) * coeff;
                 s.accelZ(i, j, k) += (ppin*(vzp-vz0) + ppis*(vzm-vz0)) * coeff;
