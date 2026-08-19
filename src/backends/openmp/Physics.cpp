@@ -460,28 +460,38 @@ void computeAccelerations(SimState& s)
                 VM(ppid, kp+1) = cid;
                 VM(qsiu, k+1) = computeQsi(DPe, pip, 0.5);
             }
+            // Passes 2 and 3 fused: both read velX/velY/velZ at km, k and kp,
+            // the same nine loads twice over. Pass 3 consumes no pass output,
+            // and pass 2 only needs pass 1's completed arrays.
+            //
+            // Pass 1 canNOT join them, unlike the X and Y sweeps. Its k loop
+            // wraps -- at k == numCellsZ the periodic kp folds back to 1 and
+            // writes ppid(2), which pass 2 reads at k == 1 -- so pass 1 has a
+            // backward dependency and must finish first.
             for (int k = 1; k <= KKfim; ++k) {
-                int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
-                int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
+                const int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
+                const int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
+
+                const double vxm = s.velX(i,j,km), vx0 = s.velX(i,j,k), vxp = s.velX(i,j,kp);
+                const double vym = s.velY(i,j,km), vy0 = s.velY(i,j,k), vyp = s.velY(i,j,kp);
+                const double vzm = s.velZ(i,j,km), vz0 = s.velZ(i,j,k), vzp = s.velZ(i,j,kp);
+
+                // Pass 2: diffusive part of Au, Av, Aw
                 const double coeff = invDz2;
-                s.accelX(i, j, k) += (VM(ppiu,k+1)*(s.velX(i,j,kp)-s.velX(i,j,k))
-                                     + VM(ppid,k+1)*(s.velX(i,j,km)-s.velX(i,j,k))) * coeff;
-                s.accelY(i, j, k) += (VM(ppiu,k+1)*(s.velY(i,j,kp)-s.velY(i,j,k))
-                                     + VM(ppid,k+1)*(s.velY(i,j,km)-s.velY(i,j,k))) * coeff;
-                s.accelZ(i, j, k) += (VM(ppiu,k+1)*(s.velZ(i,j,kp)-s.velZ(i,j,k))
-                                     + VM(ppid,k+1)*(s.velZ(i,j,km)-s.velZ(i,j,k))) * coeff;
-            }
-            for (int k = 1; k <= KKfim; ++k) {
-                int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
-                int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
-                const double wCell = s.velZ(i, j, k);
+                const double ppiuK = VM(ppiu,k+1), ppidK = VM(ppid,k+1);
+                s.accelX(i, j, k) += (ppiuK*(vxp-vx0) + ppidK*(vxm-vx0)) * coeff;
+                s.accelY(i, j, k) += (ppiuK*(vyp-vy0) + ppidK*(vym-vy0)) * coeff;
+                s.accelZ(i, j, k) += (ppiuK*(vzp-vz0) + ppidK*(vzm-vz0)) * coeff;
+
+                // Pass 3: cross-term correction (K * qsi)
+                const double wCell = vz0;
                 const double DPe = localRe * wCell * cfg.cellSizeZ;
                 double pip, ciu, cid;
                 computeExponentialWeights(localRe, DPe, pip, ciu, cid);
                 ciu *= invDz2;  cid *= invDz2;
-                VM(Ku, k+1) = ciu*(s.velX(i,j,k)-s.velX(i,j,kp)) + cid*(s.velX(i,j,k)-s.velX(i,j,km));
-                VM(Kv, k+1) = ciu*(s.velY(i,j,k)-s.velY(i,j,kp)) + cid*(s.velY(i,j,k)-s.velY(i,j,km));
-                VM(Kw, k+1) = ciu*(s.velZ(i,j,k)-s.velZ(i,j,kp)) + cid*(s.velZ(i,j,k)-s.velZ(i,j,km));
+                VM(Ku, k+1) = ciu*(vx0-vxp) + cid*(vx0-vxm);
+                VM(Kv, k+1) = ciu*(vy0-vyp) + cid*(vy0-vym);
+                VM(Kw, k+1) = ciu*(vz0-vzp) + cid*(vz0-vzm);
             }
             if (!periodic) { // Dirichlet in z: extrapolate
                 VM(Ku, 0+1) = 2.0*VM(Ku,1+1) - VM(Ku,2+1);
