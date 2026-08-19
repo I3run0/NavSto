@@ -825,9 +825,9 @@ void adaptTimeStep(SimState& s)
     for (int i = 1; i <= s.numCellsXm1; ++i)
         for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j)
             for (int k = 1; k <= cfg.numCellsZ; ++k) {
-                uMax = std::max(uMax, std::abs(s.velX(i,j,k)));
-                vMax = std::max(vMax, std::abs(s.velY(i,j,k)));
-                wMax = std::max(wMax, std::abs(s.velZ(i,j,k)));
+                uMax = std::max(uMax, static_cast<double>(std::abs(s.velX(i,j,k))));
+                vMax = std::max(vMax, static_cast<double>(std::abs(s.velY(i,j,k))));
+                wMax = std::max(wMax, static_cast<double>(std::abs(s.velZ(i,j,k))));
             }
 
     const double reForDiff = (cfg.hyperViscousStart == 0) ? cfg.reynoldsNumber : cfg.hyperViscousRe;

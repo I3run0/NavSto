@@ -26,6 +26,7 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <type_traits>
 #include <utility>
 #include <string>
 #include <vector>
@@ -131,7 +132,10 @@ Options parseArgs(int argc, char* argv[]) {
 // ---------------------------------------------------------------------------
 struct Snapshot {
     bool press = false, vel = false;
-    std::vector<double> pressData, velXData, velYData, velZData;
+    /// Same element type the backend's Field uses, so kbench builds whether
+    /// that is double or float.
+    using FieldData = std::decay_t<decltype(std::declval<SimState&>().press.data())>;
+    FieldData pressData, velXData, velYData, velZData;
 
     void capture(const SimState& s) {
         if (press) pressData = s.press.data();
