@@ -84,12 +84,20 @@ and **240x120x60 is not** — at 7 GB of RAM its footprint puts kernels the chan
 cannot touch anywhere between 0.76x and 1.47x. Production-size claims come from
 the whole-program tiers, not from kbench.
 
-The OpenMP kernel tier is a coarse instrument here and does not get better with
-more repeats — 9 repeats measured *worse* than 5, because the jitter is thread
-placement across heterogeneous cores, not sampling. So: prove a restructuring on
-the serial kernel tier, port it, and confirm the OpenMP side with
-`--tier reward --backend openmp` rather than trying to resolve a 5% kernel delta
-that this machine cannot see. A sub-13% whole-program win is not provable here
+**Multi-threaded kernel timing is not a signal on this machine — at all.** Two
+binaries whose relevant code is byte-identical measured 1.85x apart at 6
+threads, 7/7 pairs, while tying to within 1% at one thread; the same binary
+ranges 0.30–1.20 ms run to run. Explicit `OMP_PLACES` does not fix it. So:
+
+- Measure an OpenMP **code** change at `--threads 1`, interleaved. That is the
+  same code path, and it is reproducible to ~2%. The buildPressureSource port
+  reads 2.29x there and an unusable 1.07–2.06x at six.
+- Take **threading speedup** from `--tier reward --backend openmp` — whole
+  program, where the jitter averages out — or do not claim a number.
+
+Absolute levels drift hard over minutes: the same kernel and binary measured
+0.72 ms and 0.50 ms twenty minutes apart. Only ratios from an interleaved
+window mean anything; never compare two numbers from different windows. A sub-13% whole-program win is not provable here
 at all — say so rather than claiming it.
 
 ### Check whether the kernel vectorises before tuning it

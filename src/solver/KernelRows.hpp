@@ -1,9 +1,8 @@
 #pragma once
 // =============================================================================
-//  PressureSourceRow.hpp — one k-row of buildPressureSource, for both host
-//  backends.
+//  KernelRows.hpp — one k-row of a kernel, for both host backends.
 //
-//  Lifted out of the kernel because of how it compiles, not to share code:
+//  These live here because of how they compile, not to share code:
 //  written in place the vectoriser reports "no vectype for stmt" and leaves the
 //  row scalar, while the identical loop in its own function vectorises to
 //  32-byte vectors. noinline keeps it that way; one call per (i,j) row costs
@@ -44,5 +43,34 @@ void pressureSourceRow(const double* __restrict vxa, const double* __restrict vx
                             - aza[q] - azc[q] - azb[q] - azd[q]) * qInvDz;
 
         out[k] = (divU + divV + divW) * invDt + (divAu + divAv + divAw);
+    }
+}
+
+// One k-row of updateVelocities. Same three reasons as above: restrict
+// pointers so the velocity stores cannot be thought to hit press's own
+// strides, a kp that stays affine (the periodic wrap is peeled by the caller),
+// and its own function so the loop is not inside an outlined clone.
+__attribute__((noinline)) inline
+void velocityUpdateRow(const double* __restrict pa, const double* __restrict pb,
+                       const double* __restrict pc, const double* __restrict pd,
+                       const double* __restrict ax, const double* __restrict ay,
+                       const double* __restrict az,
+                       double* __restrict vx, double* __restrict vy,
+                       double* __restrict vz, int kFrom, int kTo, int kpOff,
+                       double qInvDx, double qInvDy, double qInvDz, double dtEff)
+{
+    for (int k = kFrom; k <= kTo; ++k) {
+        const int kp = k + kpOff;
+
+        const double dpu = (pb[kp] - pa[kp] + pd[kp] - pc[kp]
+                          + pb[k]  - pa[k]  + pd[k]  - pc[k])  * qInvDx;
+        const double dpv = (pc[kp] - pa[kp] + pd[kp] - pb[kp]
+                          + pc[k]  - pa[k]  + pd[k]  - pb[k])  * qInvDy;
+        const double dpw = (pc[kp] + pa[kp] + pd[kp] + pb[kp]
+                          - pc[k]  - pa[k]  - pd[k]  - pb[k])  * qInvDz;
+
+        vx[k] += (ax[k] - dpu) * dtEff;
+        vy[k] += (ay[k] - dpv) * dtEff;
+        vz[k] += (az[k] - dpw) * dtEff;
     }
 }

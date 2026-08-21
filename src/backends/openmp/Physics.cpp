@@ -28,7 +28,7 @@
 #include "Physics.hpp"
 #include "Logger.hpp"
 #include "Geometry.hpp"
-#include "PressureSourceRow.hpp"
+#include "KernelRows.hpp"
 #include "VelocityBCs.hpp"
 #include "ViscosityModel.hpp"
 
@@ -691,31 +691,42 @@ void updateVelocities(SimState& s)
     const double dt_eff = s.useHalfStep ? 0.5 * s.timeStepSize : s.timeStepSize;
     const int KKfim = (cfg.lateralCondition == LateralBC::SolidWall) ? s.numCellsZm1 : cfg.numCellsZ;
 
-    // Parallel over i: iteration i writes only vel*(i,·,·); press and accel are
-    // read-only here, so nothing another iteration writes is read.
+    // Same shape as buildPressureSource: restrict pointers, and the periodic
+    // wrap peeled so kp stays affine. See KernelRows.hpp.
+    const auto gs = s.press.gridSize();
+    const std::size_t sJ = static_cast<std::size_t>(gs.sJ), sK = static_cast<std::size_t>(gs.sK);
+    const double* __restrict pr = s.press.data().data();
+    const double* __restrict ax = s.accelX.data().data();
+    const double* __restrict ay = s.accelY.data().data();
+    const double* __restrict az = s.accelZ.data().data();
+    double* __restrict vx = s.velX.data().data();
+    double* __restrict vy = s.velY.data().data();
+    double* __restrict vz = s.velZ.data().data();
+
+    const bool wraps = (KKfim == cfg.numCellsZ);   // kp = 1 on the last k
+    const int kAffineTo = wraps ? KKfim - 1 : KKfim;
+
+    // Parallel over i: iteration i writes only vel*(i,·,·); press and accel
+    // are read-only here, so nothing another iteration writes is read.
     #pragma omp parallel for schedule(static)
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int ip = i + 1;
         for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
             const int jp = j + 1;
-            for (int k = 1; k <= KKfim; ++k) {
-                const int kp = (k < cfg.numCellsZ) ? k+1 : 1;
+            const std::size_t a = (static_cast<std::size_t>(i)  * sJ + j ) * sK;
+            const std::size_t b = (static_cast<std::size_t>(ip) * sJ + j ) * sK;
+            const std::size_t c = (static_cast<std::size_t>(i)  * sJ + jp) * sK;
+            const std::size_t d = (static_cast<std::size_t>(ip) * sJ + jp) * sK;
+            const std::size_t o = (static_cast<std::size_t>(i)  * sJ + j ) * sK;
 
-                const double dpu = (s.press(ip,j,kp) - s.press(i,j,kp) + s.press(ip,jp,kp) - s.press(i,jp,kp)
-                                  + s.press(ip,j,k)  - s.press(i,j,k)  + s.press(ip,jp,k)  - s.press(i,jp,k)) * qInvDx;
-                const double dpv = (s.press(i,jp,kp) - s.press(i,j,kp) + s.press(ip,jp,kp) - s.press(ip,j,kp)
-                                  + s.press(i,jp,k)  - s.press(i,j,k)  + s.press(ip,jp,k)  - s.press(ip,j,k)) * qInvDy;
-                const double dpw = (s.press(i,jp,kp) + s.press(i,j,kp) + s.press(ip,jp,kp) + s.press(ip,j,kp)
-                                  - s.press(i,jp,k)  - s.press(i,j,k)  - s.press(ip,jp,k)  - s.press(ip,j,k)) * qInvDz;
+            velocityUpdateRow(pr+a, pr+b, pr+c, pr+d, ax+o, ay+o, az+o,
+                              vx+o, vy+o, vz+o, 1, kAffineTo, 1,
+                              qInvDx, qInvDy, qInvDz, dt_eff);
+            if (wraps)
+                velocityUpdateRow(pr+a, pr+b, pr+c, pr+d, ax+o, ay+o, az+o,
+                                  vx+o, vy+o, vz+o, KKfim, KKfim,
+                                  1 - cfg.numCellsZ, qInvDx, qInvDy, qInvDz, dt_eff);
 
-                const double du = s.accelX(i,j,k) - dpu;
-                const double dv = s.accelY(i,j,k) - dpv;
-                const double dw = s.accelZ(i,j,k) - dpw;
-
-                s.velX(i,j,k) += du * dt_eff;
-                s.velY(i,j,k) += dv * dt_eff;
-                s.velZ(i,j,k) += dw * dt_eff;
-            }
             if (cfg.lateralCondition == LateralBC::Periodic) {
                 s.velX(i,j,0) = s.velX(i,j,cfg.numCellsZ);
                 s.velY(i,j,0) = s.velY(i,j,cfg.numCellsZ);
