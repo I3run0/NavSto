@@ -307,3 +307,31 @@ python3 scripts/validate_cuda.py          # correctness gate (builds serial + CU
 deliberately narrow choice (see `docs/roofline.md`/`docs/openmp-
 parallelization.md` for the same "this machine, stated plainly" approach
 to hardware-specific numbers), not a generic multi-arch build.
+
+## Later work, and one thing that did not pay (2026-08-21)
+
+Four changes landed, all bit-identical against the previous binary
+(convergence CSV and final VTK compared byte for byte) and all measured with
+`scripts/paired_app.py` — interleaved whole-application runs, since the CUDA
+backend has no kbench:
+
+| change | 96x48x24 | 192x96x48 |
+|---|---|---|
+| ghost-cell mirrors, one thread per (i,k) instead of per i | 1.509x | 1.320x |
+| sweep scratch indexed by element, not per-thread slice | 1.100x | 2.366x |
+| three velocity maxima in one reduction pass | 1.075x | 1.030x |
+| X sweep as four per-cell kernels | 1.057x | 1.086x |
+
+The scratch transpose is the one to remember: adjacent threads in a warp
+differ by k, so a per-thread slice put their reads of the same element
+`scratchLen` apart and every access cost its own transaction. The gap between
+its two columns is the shape of that problem — the bigger the grid, the more
+of the scratch misses L2.
+
+**The same per-cell split applied to the Y sweep measured 0.991x at 192x96x48
+(1/3 pairs) and 0.961x at 96x48x24 (2/5), and was reverted.** The X sweep ran
+one thread per (j,k) — 1,128 of them at 96x48x24 — while the Y sweep already
+ran one per (i,k), twice as many, over a j-span half as long. There was much
+less starvation to fix, and what was left did not cover the extra launches and
+the velocity re-reads they cost. The Z sweep, at one thread per (i,j), starts
+from more parallelism still, so it was not attempted.
