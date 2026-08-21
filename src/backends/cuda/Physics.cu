@@ -522,11 +522,15 @@ void buildPressureSourceCuda(DeviceState& d, Real timeStepSize) {
 // ═════════════════════════════════════════════════════════════════════════
 
 __global__ void mirrorGhostCellsCrossRowKernel(DeviceState d) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-    if (i > d.numCellsX) return;
+    // One thread per (i, k), not per i: the k loop was pure serial work inside
+    // each thread, and numCellsX threads leaves this GPU almost idle.
+    const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    if (tid >= (long long)d.numCellsX * d.numCellsZ) return;
+    const int i = 1 + (int)(tid / d.numCellsZ);
+    const int k = 1 + (int)(tid % d.numCellsZ);
     const int im = i - 1, ip = i + 1;
     int jLoopS, jLoopN; mirrorJRange(d, i, jLoopS, jLoopN);
-    for (int k = 1; k <= d.numCellsZ; ++k) {
+    {
         for (int j = jLoopS; j <= jLoopN; ++j) {
             if (i == 1 || i == d.iLow[j] + 1)            PRES(d, im, j, k) = PRES(d, i, j, k);
             if (i == d.numCellsX || i == d.iHigh[j])     PRES(d, ip, j, k) = PRES(d, i, j, k);
@@ -535,10 +539,13 @@ __global__ void mirrorGhostCellsCrossRowKernel(DeviceState d) {
 }
 
 __global__ void mirrorGhostCellsSameRowKernel(DeviceState d) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-    if (i > d.numCellsX) return;
+    // One thread per (i, k); see the cross-row kernel above.
+    const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    if (tid >= (long long)d.numCellsX * d.numCellsZ) return;
+    const int i = 1 + (int)(tid / d.numCellsZ);
+    const int k = 1 + (int)(tid % d.numCellsZ);
     int jLoopS, jLoopN; mirrorJRange(d, i, jLoopS, jLoopN);
-    for (int k = 1; k <= d.numCellsZ; ++k) {
+    {
         for (int j = jLoopS; j <= jLoopN; ++j) {
             if (j == jLoopS)                              PRES(d, i, j - 1, k) = PRES(d, i, j, k);
             if (j == jLoopN)                              PRES(d, i, j + 1, k) = PRES(d, i, j, k);
@@ -587,11 +594,11 @@ void solvePressurePoissonCuda(DeviceState& d) {
     CUDA_CHECK(cudaMemcpy(&pRef, d.press + d.idx(d.iRef, d.jRef, d.kRef), sizeof(Real), cudaMemcpyDeviceToHost));
 
     for (int sweep = 0; sweep < d.numPressureIter; ++sweep) {
-        mirrorGhostCellsCrossRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
-        mirrorGhostCellsSameRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsCrossRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsSameRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
         updateColorKernel<<<gridFor(d.nRed), CUDA_BLOCK>>>(d, d.redCells, d.nRed, cX, cY, cZ, invDiag, pRef);
-        mirrorGhostCellsCrossRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
-        mirrorGhostCellsSameRowKernel<<<gridFor(d.numCellsX), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsCrossRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsSameRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
         updateColorKernel<<<gridFor(d.nBlack), CUDA_BLOCK>>>(d, d.blackCells, d.nBlack, cX, cY, cZ, invDiag, pRef);
     }
     CUDA_CHECK(cudaGetLastError());
