@@ -174,10 +174,25 @@ void computeAccelerations(SimState& s)
     const bool periodic = (cfg.lateralCondition == LateralBC::Periodic);
     const int KKfim = periodic ? cfg.numCellsZ : s.numCellsZm1;
 
-    // Zero all acceleration arrays
-    s.accelX.fill(0.0);
-    s.accelY.fill(0.0);
-    s.accelZ.fill(0.0);
+    // Reset the accumulators only where a sweep writes; see the serial
+    // backend for why everything outside that region is already zero. The
+    // span table is built here, outside the parallel region, because the
+    // first call would otherwise have every thread building it at once.
+    auto& zeroJLo = s.ext.accel.zeroJLo;
+    auto& zeroJHi = s.ext.accel.zeroJHi;
+    if (zeroJLo.empty()) buildAccelZeroSpans(s, zeroJLo, zeroJHi);
+
+    // One run per column, not one per row: j is the middle index, so a column's
+    // whole j-span is contiguous in memory. See the serial backend.
+    const int sK = s.accelX.gridSize().sK;
+    #pragma omp parallel for schedule(static)
+    for (int i = 1; i <= s.numCellsXm1; ++i) {
+        if (zeroJHi[i] < zeroJLo[i]) continue;
+        const std::size_t n = static_cast<std::size_t>(zeroJHi[i] - zeroJLo[i] + 1) * sK;
+        std::fill_n(&s.accelX(i, zeroJLo[i], 0), n, 0.0);
+        std::fill_n(&s.accelY(i, zeroJLo[i], 0), n, 0.0);
+        std::fill_n(&s.accelZ(i, zeroJLo[i], 0), n, 0.0);
+    }
 
     // Helper to access offset arrays (logical idx -> physical idx+1). Takes
     // a raw double* (not std::vector<double>&) so it works uniformly on

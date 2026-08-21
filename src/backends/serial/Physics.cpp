@@ -31,10 +31,27 @@ void computeAccelerations(SimState& s)
     const bool periodic = (cfg.lateralCondition == LateralBC::Periodic);
     const int KKfim = periodic ? cfg.numCellsZ : s.numCellsZm1;
 
-    // Zero all acceleration arrays
-    s.accelX.fill(0.0);
-    s.accelY.fill(0.0);
-    s.accelZ.fill(0.0);
+    // Reset the accumulators, but only where a sweep actually writes. The
+    // three fills used to zero the whole allocation, of which the active
+    // region is well under half in a non-rectangular domain; everything
+    // outside it is written by nothing but explicit `= 0.0` assignments, so it
+    // holds the zero GridField's constructor put there and re-zeroing it is
+    // pure store traffic. Measured 14.4% of this kernel at 240x120x60.
+    auto& zeroJLo = s.ext.accel.zeroJLo;
+    auto& zeroJHi = s.ext.accel.zeroJHi;
+    if (zeroJLo.empty()) buildAccelZeroSpans(s, zeroJLo, zeroJHi);
+
+    // One run per column, not one per row: j is the middle index, so a column's
+    // whole j-span is contiguous in memory. Row-at-a-time fills of numCellsZ+1
+    // doubles measured slower than the full fill they replaced.
+    const int sK = s.accelX.gridSize().sK;
+    for (int i = 1; i <= s.numCellsXm1; ++i) {
+        if (zeroJHi[i] < zeroJLo[i]) continue;
+        const std::size_t n = static_cast<std::size_t>(zeroJHi[i] - zeroJLo[i] + 1) * sK;
+        std::fill_n(&s.accelX(i, zeroJLo[i], 0), n, 0.0);
+        std::fill_n(&s.accelY(i, zeroJLo[i], 0), n, 0.0);
+        std::fill_n(&s.accelZ(i, zeroJLo[i], 0), n, 0.0);
+    }
 
     // Temporary 1‑D arrays (logical index -1 .. maxDim+1) offset by +1.
     // Sized maxDim+3 (not maxDim+2) in AccelScratch::allocate(): several

@@ -34,6 +34,11 @@ struct AccelScratch {
     /// 12.16 MB against a ~12 MB L3 and inverted OpenMP scaling past 4 threads.
     std::vector<double> qsieXK, KuXK, KvXK, KwXK;
     std::vector<double> ppiwRow;  ///< west coefficient carried from i-1 (or j-1)
+
+    /// Per-column j-span of the acceleration cells that need resetting each
+    /// call, from buildAccelZeroSpans(). Empty until the first call builds it;
+    /// geometry is not known yet when allocate() runs.
+    std::vector<int> zeroJLo, zeroJHi;
     int scratchKLen = 0;          ///< k-stride within one thread's (i,k) slice
     int xk2DLenPerThread = 0;     ///< one thread's slice length in the XK buffers
 
