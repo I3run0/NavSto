@@ -9,6 +9,8 @@
 //  nothing against numCellsZ cells.
 // =============================================================================
 
+#include <cmath>
+
 __attribute__((noinline)) inline
 void pressureSourceRow(const double* __restrict vxa, const double* __restrict vxb,
                        const double* __restrict vxc, const double* __restrict vxd,
@@ -102,5 +104,60 @@ void crossTermRow(double* __restrict ax, double* __restrict ay, double* __restri
         ax[k] -= (kuHi[k]*qHi[k] - kuLo[k]*qLo[k]);
         ay[k] -= (kvHi[k]*qHi[k] - kvLo[k]*qLo[k]);
         az[k] -= (kwHi[k]*qHi[k] - kwLo[k]*qLo[k]);
+    }
+}
+
+// One k-row of computeDivergence's 8-corner divergence, into a scratch row.
+// The kernel's reductions must stay scalar and in order to keep the sums
+// bit-identical; only the stencil moves here, where it vectorises.
+__attribute__((noinline)) inline
+void divergenceRow(const double* __restrict vxa, const double* __restrict vxb,
+                   const double* __restrict vxc, const double* __restrict vxd,
+                   const double* __restrict vya, const double* __restrict vyb,
+                   const double* __restrict vyc, const double* __restrict vyd,
+                   const double* __restrict vza, const double* __restrict vzb,
+                   const double* __restrict vzc, const double* __restrict vzd,
+                   double* __restrict out, int kFrom, int kTo, int kmOff,
+                   double qInvDx, double qInvDy, double qInvDz)
+{
+    for (int k = kFrom; k <= kTo; ++k) {
+        const int q = k - kmOff;
+        out[k] = (vxa[k] - vxb[k] + vxc[k] - vxd[k]
+                + vxa[q] - vxb[q] + vxc[q] - vxd[q]) * qInvDx
+               + (vya[k] - vyc[k] + vyb[k] - vyd[k]
+                + vya[q] - vyc[q] + vyb[q] - vyd[q]) * qInvDy
+               + (vza[k] + vzc[k] + vzb[k] + vzd[k]
+                - vza[q] - vzc[q] - vzb[q] - vzd[q]) * qInvDz;
+    }
+}
+
+// One k-row of computeMomentumResidual. Both outputs are needed: the norm goes
+// to scratchField for the VTK export and feeds the max, and the square feeds
+// the RMS sum -- recomputing one from the other would not be bit-identical.
+__attribute__((noinline)) inline
+void momentumResidualRow(const double* __restrict pa, const double* __restrict pb,
+                         const double* __restrict pc, const double* __restrict pd,
+                         const double* __restrict ax, const double* __restrict ay,
+                         const double* __restrict az,
+                         double* __restrict outNorm, double* __restrict outSq,
+                         int kFrom, int kTo, int kpOff,
+                         double qInvDx, double qInvDy, double qInvDz)
+{
+    for (int k = kFrom; k <= kTo; ++k) {
+        const int kp = k + kpOff;
+
+        const double gradPx = (pb[k]  - pa[k]  + pd[k]  - pc[k]
+                             + pb[kp] - pa[kp] + pd[kp] - pc[kp]) * qInvDx;
+        const double gradPy = (pc[k]  - pa[k]  + pd[k]  - pb[k]
+                             + pc[kp] - pa[kp] + pd[kp] - pb[kp]) * qInvDy;
+        const double gradPz = (-pc[k]  - pa[k]  - pd[k]  - pb[k]
+                             +  pc[kp] + pa[kp] + pd[kp] + pb[kp]) * qInvDz;
+
+        const double resU = ax[k] - gradPx;
+        const double resV = ay[k] - gradPy;
+        const double resW = az[k] - gradPz;
+        const double resSq = resU*resU + resV*resV + resW*resW;
+        outSq[k]   = resSq;
+        outNorm[k] = std::sqrt(resSq);
     }
 }

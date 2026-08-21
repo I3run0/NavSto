@@ -41,6 +41,12 @@ struct AccelScratch {
     /// everything any sweep writes and [xJLo, xJHi] the part the X sweep
     /// assigns outright, so only the two j-runs outside it need zeroing.
     std::vector<int> zeroJLo, zeroJHi, xJLo, xJHi;
+
+    /// One k-row of intermediate values, numThreads slices of rowLenPerThread.
+    /// computeDivergence and computeMomentumResidual write their per-cell
+    /// value here so the stencil can vectorise, then reduce it in order.
+    std::vector<double> rowBuf;
+    int rowLenPerThread = 0;
     int scratchKLen = 0;          ///< k-stride within one thread's (i,k) slice
     int xk2DLenPerThread = 0;     ///< one thread's slice length in the XK buffers
 
@@ -75,5 +81,9 @@ struct AccelScratch {
         qsieXK.assign(totalXK, 0.0);
         ppiwRow.assign(static_cast<std::size_t>(scratchKLen) * numThreads, 0.0);
         KuXK  .assign(totalXK, 0.0); KvXK  .assign(totalXK, 0.0); KwXK.assign(totalXK, 0.0);
+
+        const std::size_t rowLen = padTo8(static_cast<std::size_t>(cfg.numCellsZ) + 2);
+        rowLenPerThread = static_cast<int>(rowLen);
+        rowBuf.assign(rowLen * static_cast<std::size_t>(numThreads), 0.0);
     }
 };

@@ -622,7 +622,6 @@ void updateVelocities(SimState& s)
 void computeMomentumResidual(SimState& s)
 {
     const auto& cfg = s.cfg;
-    s.scratchField.fill(0.0);
     const double qInvDx = 0.25 / cfg.cellSizeX;
     const double qInvDy = 0.25 / cfg.cellSizeY;
     const double qInvDz = 0.25 / cfg.cellSizeZ;
@@ -632,32 +631,44 @@ void computeMomentumResidual(SimState& s)
     s.momentumResidRMS = 0.0;
     long long count = 0;
 
+    // No scratchField.fill: this kernel is the only writer, and the cells it
+    // skips have held zero since the field was constructed. Same reasoning as
+    // computeAccelerations' reset.
+    //
+    // The stencil goes through momentumResidualRow so it vectorises; the max
+    // and the RMS sum stay scalar and in order, since a vectorised sum would
+    // reassociate.
+    const auto gs = s.press.gridSize();
+    const std::size_t sJ = static_cast<std::size_t>(gs.sJ), sK = static_cast<std::size_t>(gs.sK);
+    const double* __restrict pr = s.press.data().data();
+    const double* __restrict ax = s.accelX.data().data();
+    const double* __restrict ay = s.accelY.data().data();
+    const double* __restrict az = s.accelZ.data().data();
+    double* __restrict scr = s.scratchField.data().data();
+    double* __restrict sq  = s.ext.accel.rowBuf.data();
+
+    const bool wraps = (KKfim == cfg.numCellsZ);
+    const int kAffineTo = wraps ? KKfim - 1 : KKfim;
+
     for (int i = 1; i <= s.numCellsXm1; ++i) {
         const int ip = i + 1;
         for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
             const int jp = j + 1;
+            const std::size_t a = (static_cast<std::size_t>(i)  * sJ + j ) * sK;
+            const std::size_t b = (static_cast<std::size_t>(ip) * sJ + j ) * sK;
+            const std::size_t c = (static_cast<std::size_t>(i)  * sJ + jp) * sK;
+            const std::size_t d = (static_cast<std::size_t>(ip) * sJ + jp) * sK;
+
+            momentumResidualRow(pr+a, pr+b, pr+c, pr+d, ax+a, ay+a, az+a,
+                                scr+a, sq, 1, kAffineTo, 1, qInvDx, qInvDy, qInvDz);
+            if (wraps)
+                momentumResidualRow(pr+a, pr+b, pr+c, pr+d, ax+a, ay+a, az+a,
+                                    scr+a, sq, KKfim, KKfim, 1 - cfg.numCellsZ,
+                                    qInvDx, qInvDy, qInvDz);
+
             for (int k = 1; k <= KKfim; ++k) {
-                const int kp = (k < cfg.numCellsZ) ? k+1 : 1;
-
-                const double gradPx =
-                    (s.press(ip,j,k) - s.press(i,j,k) + s.press(ip,jp,k) - s.press(i,jp,k)
-                   + s.press(ip,j,kp) - s.press(i,j,kp) + s.press(ip,jp,kp) - s.press(i,jp,kp)) * qInvDx;
-                const double gradPy =
-                    (s.press(i,jp,k) - s.press(i,j,k) + s.press(ip,jp,k) - s.press(ip,j,k)
-                   + s.press(i,jp,kp) - s.press(i,j,kp) + s.press(ip,jp,kp) - s.press(ip,j,kp)) * qInvDy;
-                const double gradPz =
-                    (-s.press(i,jp,k) - s.press(i,j,k) - s.press(ip,jp,k) - s.press(ip,j,k)
-                    + s.press(i,jp,kp) + s.press(i,j,kp) + s.press(ip,jp,kp) + s.press(ip,j,kp)) * qInvDz;
-
-                const double resU = s.accelX(i,j,k) - gradPx;
-                const double resV = s.accelY(i,j,k) - gradPy;
-                const double resW = s.accelZ(i,j,k) - gradPz;
-                const double resSq    = resU*resU + resV*resV + resW*resW;
-                const double resNorm  = std::sqrt(resSq);
-                s.scratchField(i,j,k) = resNorm;
-
-                s.momentumResidMax = std::max(s.momentumResidMax, resNorm);
-                s.momentumResidRMS += resSq;
+                s.momentumResidMax = std::max(s.momentumResidMax, scr[a+k]);
+                s.momentumResidRMS += sq[k];
                 ++count;
             }
         }
@@ -680,23 +691,39 @@ void computeDivergence(SimState& s)
     s.intDivergence    = 0.0;
     s.intAbsDivergence = 0.0;
 
+    // The stencil goes through divergenceRow so it vectorises; the three
+    // reductions stay here, scalar and in the original order, because a
+    // vectorised sum would reassociate and stop being bit-identical.
+    const auto gs = s.velX.gridSize();
+    const std::size_t sJ = static_cast<std::size_t>(gs.sJ), sK = static_cast<std::size_t>(gs.sK);
+    const double* __restrict vx = s.velX.data().data();
+    const double* __restrict vy = s.velY.data().data();
+    const double* __restrict vz = s.velZ.data().data();
+    double* __restrict row = s.ext.accel.rowBuf.data();
+    const bool periodic = (cfg.lateralCondition == LateralBC::Periodic);
+
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         const int im = i - 1;
         int jS, jN; activeJRange(s, i, jS, jN);
 
         for (int j = jS; j <= jN; ++j) {
             const int jm = j - 1;
+            const std::size_t a = (static_cast<std::size_t>(i)  * sJ + j ) * sK;
+            const std::size_t b = (static_cast<std::size_t>(im) * sJ + j ) * sK;
+            const std::size_t c = (static_cast<std::size_t>(i)  * sJ + jm) * sK;
+            const std::size_t d = (static_cast<std::size_t>(im) * sJ + jm) * sK;
+
+            for (int pass = 0; pass < 2; ++pass) {
+                const int kFrom = pass ? 2 : 1;
+                const int kTo   = pass ? cfg.numCellsZ : 1;
+                const int kmOff = pass ? 1 : (periodic ? 1 - cfg.numCellsZ : 1);
+                divergenceRow(vx+a, vx+b, vx+c, vx+d, vy+a, vy+b, vy+c, vy+d,
+                              vz+a, vz+b, vz+c, vz+d, row, kFrom, kTo, kmOff,
+                              qInvDx, qInvDy, qInvDz);
+            }
+
             for (int k = 1; k <= cfg.numCellsZ; ++k) {
-                const int km = (cfg.lateralCondition == LateralBC::Periodic && k == 1) ? cfg.numCellsZ : k-1;
-
-                const double div =
-                    (s.velX(i,j,k) - s.velX(im,j,k) + s.velX(i,jm,k) - s.velX(im,jm,k)
-                   + s.velX(i,j,km) - s.velX(im,j,km) + s.velX(i,jm,km) - s.velX(im,jm,km)) * qInvDx
-                  + (s.velY(i,j,k) - s.velY(i,jm,k) + s.velY(im,j,k) - s.velY(im,jm,k)
-                   + s.velY(i,j,km) - s.velY(i,jm,km) + s.velY(im,j,km) - s.velY(im,jm,km)) * qInvDy
-                  + (s.velZ(i,j,k) + s.velZ(i,jm,k) + s.velZ(im,j,k) + s.velZ(im,jm,k)
-                   - s.velZ(i,j,km) - s.velZ(i,jm,km) - s.velZ(im,j,km) - s.velZ(im,jm,km)) * qInvDz;
-
+                const double div = row[k];
                 s.intDivergence    += div;
                 s.intAbsDivergence += std::abs(div);
                 s.dilatationMax     = std::max(s.dilatationMax, std::abs(div));
