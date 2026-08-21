@@ -52,7 +52,11 @@ struct Options {
     // on a short row). production_can.cfg runs RoundedCorner, not the
     // AbruptExpansion this used to hardcode.
     std::string shape = "RoundedCorner";
-    int baseUnit = 40;
+    // 0 = derive from the grid. production_can.cfg is 9*NN x 3*NN x 1.5*NN at
+    // NN=40, so NN = numCellsY/3 keeps a reduced grid geometrically similar to
+    // production instead of measuring a differently-proportioned channel. A
+    // fixed 40 threw on the default 96x48x24, whose legal ceiling is 24.
+    int baseUnit = 0;
     std::string solver = "GaussSeidel";
     double sorOmega = -1.0;   // <0 = leave SimConfig's default
     int mgPre = 1, mgCoarse = 8, mgPost = 1;
@@ -69,7 +73,8 @@ struct Options {
         "  --re R          Reynolds number (default: 10000, the production value)\n"
         "  --shape NAME    AbruptExpansion|AbruptContraction|SharpCorner|\n"
         "                  RoundedCorner|Straight (default: RoundedCorner)\n"
-        "  --base-unit N   geometry base unit NN (default: 40)\n"
+        "  --base-unit N   geometry base unit NN (default: numCellsY/3, the\n"
+        "                  production proportion)\n"
         "  --solver NAME   GaussSeidel|Multigrid (default: GaussSeidel)\n"
         "  --omega W       SOR relaxation factor (default: SimConfig's 1.7)\n"
         "  --mg P,C,Q      multigrid pre,coarse,post sweeps (default: 1,8,1)\n";
@@ -249,7 +254,7 @@ void buildState(SimState& s, const Options& o) {
     s.cfg.numCellsY = o.numCellsY;
     s.cfg.numCellsZ = o.numCellsZ;
     s.cfg.numPressureIter = o.numPressureIter;
-    s.cfg.baseUnit = o.baseUnit;
+    s.cfg.baseUnit = o.baseUnit > 0 ? o.baseUnit : std::max(1, o.numCellsY / 3);
     s.cfg.pressureSolver = (o.solver == "Multigrid") ? PressureSolver::Multigrid
                                                      : PressureSolver::GaussSeidel;
     if (o.sorOmega > 0.0) s.cfg.sorOmega = o.sorOmega;
@@ -335,6 +340,8 @@ int main(int argc, char* argv[])
     std::cout << "  \"numPressureIter\": " << o.numPressureIter << ",\n";
     std::cout << "  \"reynoldsNumber\": " << o.reynoldsNumber << ",\n";
     std::cout << "  \"shape\": \"" << o.shape << "\",\n";
+    std::cout << "  \"baseUnit\": "
+              << (o.baseUnit > 0 ? o.baseUnit : std::max(1, o.numCellsY / 3)) << ",\n";
 
     long long activeCells = 0;
     std::vector<std::string> records;

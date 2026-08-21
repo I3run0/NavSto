@@ -37,7 +37,15 @@ from harness import (BIN_DIR, KBENCH, KBENCH_OMP, NOISE_K,  # noqa: E402
 
 BASELINE_DIR = REPO_ROOT / "experiments" / "results" / "baselines"
 
-TIERS = ("gate", "kernel", "reward", "attribution", "headroom", "full")
+TIERS = ("gate", "kernel", "reward", "attribution", "headroom", "full", "loop")
+
+# Composite tiers. "loop" is one optimization iteration: correctness, then the
+# two timing signals a verdict keys off, in one envelope so --baseline can
+# compare both. "full" adds the slow diagnostics you consult between rounds.
+TIER_SETS = {
+    "full": ("gate", "kernel", "reward", "attribution", "headroom"),
+    "loop": ("gate", "kernel", "reward"),
+}
 
 PROFILE_CFG = """\
 numCellsX = 96
@@ -210,7 +218,7 @@ def main():
             targets += ["navsolver_omp", "navsolver_kbench_omp"]
         build(*targets, required=("navsolver",))
 
-    wanted = TIERS[:-1] if args.tier == "full" else (args.tier,)
+    wanted = TIER_SETS.get(args.tier, (args.tier,))
     result = envelope(tool="measure", tier=args.tier, backend=args.backend)
 
     runners = {"gate": tier_gate, "kernel": tier_kernel, "reward": tier_reward,
@@ -228,7 +236,15 @@ def main():
         log(f"\n  verdict: {result['comparison']['summary']} "
             f"(vs {base.get('git_commit', '?')})")
 
-    if args.save:
+    # A tier that threw leaves an empty signal behind. Saving that as a baseline
+    # would compare every future run against nothing, and exiting 0 would tell
+    # the loop driving this that the measurement succeeded -- both silently.
+    broken = [t for t in wanted
+              if isinstance(result.get(t), dict) and result[t].get("status") == "error"]
+    if broken:
+        log(f"  ERROR: tier(s) failed: {', '.join(broken)} — not saving a baseline")
+
+    if args.save and not broken:
         BASELINE_DIR.mkdir(parents=True, exist_ok=True)
         path = BASELINE_DIR / f"{result['timestamp_utc']}_{result['git_commit']}.json"
         path.write_text(json.dumps(result, indent=2, default=str))
@@ -236,8 +252,10 @@ def main():
 
     emit_json(result)
 
+    if broken:
+        sys.exit(1)
     gate = result.get("gate")
-    if gate and gate.get("status") == "fail":
+    if gate and gate.get("status") != "pass":
         sys.exit(1)
     cmp_ = result.get("comparison")
     sys.exit(2 if cmp_ and cmp_["summary"] == "regressed" else 0)

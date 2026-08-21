@@ -254,7 +254,7 @@ def main():
     out = sys.stderr if args.json else sys.stdout
     print(file=out)
     if ok:
-        print("All CUDA-equivalence checks passed.")
+        print("All CUDA-equivalence checks passed.", file=out)
     else:
         print("CUDA-equivalence checks FAILED.", file=out)
 
