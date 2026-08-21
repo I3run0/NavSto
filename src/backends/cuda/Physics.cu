@@ -795,32 +795,81 @@ void computeDivergenceCuda(DeviceState& d, double& dilatationMax, double& intDiv
 //  adaptTimeStep
 // ═════════════════════════════════════════════════════════════════════════
 
-__global__ void velMaxKernel(DeviceState d, Real* uMax, Real* vMax, Real* wMax) {
+// Three max reductions in one pass. The previous version wrote |u|, |v| and
+// |w| into three full-length arrays and then ran three thrust::reduce calls,
+// each of which reads its array back and synchronises: three device round
+// trips and six field-sized transfers to produce three numbers. Here a
+// grid-stride loop reduces into shared memory, one partial triple per block,
+// and a single second launch folds those. max is exactly associative, so the
+// tree shape does not change the answer.
+__global__ void velMaxBlockKernel(DeviceState d, Real* partials, int nBlocks) {
+    __shared__ Real su[CUDA_BLOCK], sv[CUDA_BLOCK], sw[CUDA_BLOCK];
     const long long total = (long long)d.numCellsXm1 * (d.numCellsY + 1) * d.numCellsZ;
-    const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    if (tid >= total) return;
-    const int i = 1 + (int)(tid / ((long long)(d.numCellsY + 1) * d.numCellsZ));
-    const long long rem = tid % ((long long)(d.numCellsY + 1) * d.numCellsZ);
-    const int j = (int)(rem / d.numCellsZ);
-    const int k = 1 + (int)(rem % d.numCellsZ);
+    const long long stride = (long long)gridDim.x * blockDim.x;
 
-    if (i > d.numCellsXm1 || j < d.jLow[i] + 1 || j > d.jHigh[i] - 1) {
-        uMax[tid] = 0.0; vMax[tid] = 0.0; wMax[tid] = 0.0;
-        return;
+    Real u = 0, v = 0, w = 0;
+    for (long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+         tid < total; tid += stride) {
+        const int i = 1 + (int)(tid / ((long long)(d.numCellsY + 1) * d.numCellsZ));
+        const long long rem = tid % ((long long)(d.numCellsY + 1) * d.numCellsZ);
+        const int j = (int)(rem / d.numCellsZ);
+        const int k = 1 + (int)(rem % d.numCellsZ);
+        if (i > d.numCellsXm1 || j < d.jLow[i] + 1 || j > d.jHigh[i] - 1) continue;
+        u = fmax(u, fabs(VELX(d, i, j, k)));
+        v = fmax(v, fabs(VELY(d, i, j, k)));
+        w = fmax(w, fabs(VELZ(d, i, j, k)));
     }
-    uMax[tid] = fabs(VELX(d, i, j, k));
-    vMax[tid] = fabs(VELY(d, i, j, k));
-    wMax[tid] = fabs(VELZ(d, i, j, k));
+    su[threadIdx.x] = u; sv[threadIdx.x] = v; sw[threadIdx.x] = w;
+    __syncthreads();
+
+    for (int half = blockDim.x / 2; half > 0; half >>= 1) {
+        if (threadIdx.x < half) {
+            su[threadIdx.x] = fmax(su[threadIdx.x], su[threadIdx.x + half]);
+            sv[threadIdx.x] = fmax(sv[threadIdx.x], sv[threadIdx.x + half]);
+            sw[threadIdx.x] = fmax(sw[threadIdx.x], sw[threadIdx.x + half]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        partials[blockIdx.x]               = su[0];
+        partials[blockIdx.x + nBlocks]     = sv[0];
+        partials[blockIdx.x + 2 * nBlocks] = sw[0];
+    }
+}
+
+__global__ void velMaxFinalKernel(Real* partials, int nBlocks) {
+    Real u = 0, v = 0, w = 0;
+    for (int b = threadIdx.x; b < nBlocks; b += blockDim.x) {
+        u = fmax(u, partials[b]);
+        v = fmax(v, partials[b + nBlocks]);
+        w = fmax(w, partials[b + 2 * nBlocks]);
+    }
+    __shared__ Real su[CUDA_BLOCK], sv[CUDA_BLOCK], sw[CUDA_BLOCK];
+    su[threadIdx.x] = u; sv[threadIdx.x] = v; sw[threadIdx.x] = w;
+    __syncthreads();
+    for (int half = blockDim.x / 2; half > 0; half >>= 1) {
+        if (threadIdx.x < half) {
+            su[threadIdx.x] = fmax(su[threadIdx.x], su[threadIdx.x + half]);
+            sv[threadIdx.x] = fmax(sv[threadIdx.x], sv[threadIdx.x + half]);
+            sw[threadIdx.x] = fmax(sw[threadIdx.x], sw[threadIdx.x + half]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { partials[0] = su[0]; partials[1] = sv[0]; partials[2] = sw[0]; }
 }
 
 void adaptTimeStepCuda(DeviceState& d, double& timeStepSize) {
-    velMaxKernel<<<gridFor(d.maxCellDomain), CUDA_BLOCK>>>(d, d.cellScratch1, d.cellScratch2, d.cellScratch3);
+    // Cap the block count so the partials fit in one final block's stride and
+    // the grid-stride loop keeps every block busy on a small grid.
+    const int nBlocks = (int)std::min<long long>(
+        (d.maxCellDomain + CUDA_BLOCK - 1) / CUDA_BLOCK, 256);
+    velMaxBlockKernel<<<nBlocks, CUDA_BLOCK>>>(d, d.cellScratch1, nBlocks);
+    velMaxFinalKernel<<<1, CUDA_BLOCK>>>(d.cellScratch1, nBlocks);
     CUDA_CHECK(cudaGetLastError());
 
-    thrust::device_ptr<Real> u(d.cellScratch1), v(d.cellScratch2), w(d.cellScratch3);
-    const Real uMax = thrust::reduce(thrust::device, u, u + d.maxCellDomain, Real(0), thrust::maximum<Real>());
-    const Real vMax = thrust::reduce(thrust::device, v, v + d.maxCellDomain, Real(0), thrust::maximum<Real>());
-    const Real wMax = thrust::reduce(thrust::device, w, w + d.maxCellDomain, Real(0), thrust::maximum<Real>());
+    Real maxima[3];
+    CUDA_CHECK(cudaMemcpy(maxima, d.cellScratch1, 3 * sizeof(Real), cudaMemcpyDeviceToHost));
+    const Real uMax = maxima[0], vMax = maxima[1], wMax = maxima[2];
 
     const Real reForDiff = (d.hyperViscousStart == 0) ? d.reynoldsNumber : d.hyperViscousRe;
     const Real dtViscous = 0.5 * reForDiff / (1.0/d.cellSizeXsq + 1.0/d.cellSizeYsq + 1.0/d.cellSizeZsq);
