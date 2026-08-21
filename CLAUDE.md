@@ -70,11 +70,13 @@ Two further hazards, both met in practice on 2026-08-21:
   reported as the median of the paired ratios plus a win count. 7/7 pairs at
   1.02x is a result; 4/7 at 1.05x is not. `measure.py --baseline` now refuses a
   baseline whose backend, CPU, grid or thread count differs from the run.
-- **Two binaries differ in code layout as well as in the change.** Function
-  alignment alone moved an untouched kernel by 4% in a paired run. If a kernel
-  the change cannot reach moves consistently, that is layout: confirm by
-  putting both paths in one binary behind a runtime switch and pairing it
-  against itself.
+- **Two binaries differ in code layout as well as in the change**, and the
+  effect is per-kernel. Measured by pairing two *functionally identical* builds
+  that differ only by an appended unused function: `computeAccelerations` stays
+  inside 0.992-1.013x, while `updateVelocities` swings **0.695-1.359x**. A 1.5%
+  move in the first is signal; a 4% move in the second is nothing. Get a
+  kernel's layout band that way before believing a small delta in it, or put
+  both paths in one binary behind a runtime switch and pair it against itself.
 
 Grid choice for `kbench` on this machine: **96x48x24 is the trustworthy point**
 (untouched kernels sit at 1.000 in a layout-neutral pair), 144x72x36 is usable,
@@ -93,6 +95,9 @@ at all — say so rather than claiming it.
 ## Iteration protocol
 
 1. Baseline at HEAD (`--tier loop --save`) if there is not a current one.
+   Never gate with `--skip-build`: a stale binary passes every validator, and
+   a change that does not compile on a backend you are not building reads as
+   green. `measure.py` builds by default — let it.
 2. One hypothesis, one change. Pick it from `attribution`/`headroom`, not by
    guessing; state the mechanism you expect to pay off before measuring.
 3. Rebuild, run `--tier loop --baseline <baseline>`.
