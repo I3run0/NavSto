@@ -178,20 +178,25 @@ void computeAccelerations(SimState& s)
     // backend for why everything outside that region is already zero. The
     // span table is built here, outside the parallel region, because the
     // first call would otherwise have every thread building it at once.
-    auto& zeroJLo = s.ext.accel.zeroJLo;
-    auto& zeroJHi = s.ext.accel.zeroJHi;
-    if (zeroJLo.empty()) buildAccelZeroSpans(s, zeroJLo, zeroJHi);
+    auto& plan = s.ext.accel;
+    if (plan.zeroJLo.empty()) buildAccelResetPlan(s, plan);
 
     // One run per column, not one per row: j is the middle index, so a column's
     // whole j-span is contiguous in memory. See the serial backend.
     const int sK = s.accelX.gridSize().sK;
+    auto zeroRun = [&](int i, int jFrom, int jTo) {
+        const std::size_t n = static_cast<std::size_t>(jTo - jFrom + 1) * sK;
+        std::fill_n(&s.accelX(i, jFrom, 0), n, 0.0);
+        std::fill_n(&s.accelY(i, jFrom, 0), n, 0.0);
+        std::fill_n(&s.accelZ(i, jFrom, 0), n, 0.0);
+    };
     #pragma omp parallel for schedule(static)
     for (int i = 1; i <= s.numCellsXm1; ++i) {
-        if (zeroJHi[i] < zeroJLo[i]) continue;
-        const std::size_t n = static_cast<std::size_t>(zeroJHi[i] - zeroJLo[i] + 1) * sK;
-        std::fill_n(&s.accelX(i, zeroJLo[i], 0), n, 0.0);
-        std::fill_n(&s.accelY(i, zeroJLo[i], 0), n, 0.0);
-        std::fill_n(&s.accelZ(i, zeroJLo[i], 0), n, 0.0);
+        const int lo = plan.zeroJLo[i], hi = plan.zeroJHi[i];
+        if (hi < lo) continue;
+        if (plan.xJHi[i] < plan.xJLo[i]) { zeroRun(i, lo, hi); continue; }
+        if (plan.xJLo[i] > lo) zeroRun(i, lo, plan.xJLo[i] - 1);
+        if (plan.xJHi[i] < hi) zeroRun(i, plan.xJHi[i] + 1, hi);
     }
 
     // Helper to access offset arrays (logical idx -> physical idx+1). Takes
@@ -314,10 +319,14 @@ void computeAccelerations(SimState& s)
                 VM2(qsieXK, i+1, k) = computeQsi(DPeFace, pipF, 0.5);
 
                 // Pass 2: diffusive part of Au, Av, Aw (first part)
+                // Assign, not accumulate: this is the first write to every cell
+                // in the X sweep's range, so the reset above skips them
+                // entirely -- three fields' worth of stores, and the read half
+                // of the read-modify-write, both gone.
                 const double coeff = invDx2;
-                s.accelX(i, j, k) += (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
-                s.accelY(i, j, k) += (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
-                s.accelZ(i, j, k) += (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
+                s.accelX(i, j, k) = (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
+                s.accelY(i, j, k) = (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
+                s.accelZ(i, j, k) = (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
 
                 // Pass 3: cross-term correction (K * qsi)
                 const double uCell = vx0;

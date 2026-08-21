@@ -31,26 +31,29 @@ void computeAccelerations(SimState& s)
     const bool periodic = (cfg.lateralCondition == LateralBC::Periodic);
     const int KKfim = periodic ? cfg.numCellsZ : s.numCellsZm1;
 
-    // Reset the accumulators, but only where a sweep actually writes. The
-    // three fills used to zero the whole allocation, of which the active
-    // region is well under half in a non-rectangular domain; everything
-    // outside it is written by nothing but explicit `= 0.0` assignments, so it
-    // holds the zero GridField's constructor put there and re-zeroing it is
-    // pure store traffic. Measured 14.4% of this kernel at 240x120x60.
-    auto& zeroJLo = s.ext.accel.zeroJLo;
-    auto& zeroJHi = s.ext.accel.zeroJHi;
-    if (zeroJLo.empty()) buildAccelZeroSpans(s, zeroJLo, zeroJHi);
+    // Reset only what the X sweep below does not assign outright. Cells no
+    // sweep writes are never anything but zero -- GridField's constructor put
+    // it there and only explicit `= 0.0` assignments touch them since -- so
+    // zeroing the whole allocation every call was pure store traffic.
+    auto& plan = s.ext.accel;
+    if (plan.zeroJLo.empty()) buildAccelResetPlan(s, plan);
 
     // One run per column, not one per row: j is the middle index, so a column's
     // whole j-span is contiguous in memory. Row-at-a-time fills of numCellsZ+1
     // doubles measured slower than the full fill they replaced.
     const int sK = s.accelX.gridSize().sK;
+    auto zeroRun = [&](int i, int jFrom, int jTo) {
+        const std::size_t n = static_cast<std::size_t>(jTo - jFrom + 1) * sK;
+        std::fill_n(&s.accelX(i, jFrom, 0), n, 0.0);
+        std::fill_n(&s.accelY(i, jFrom, 0), n, 0.0);
+        std::fill_n(&s.accelZ(i, jFrom, 0), n, 0.0);
+    };
     for (int i = 1; i <= s.numCellsXm1; ++i) {
-        if (zeroJHi[i] < zeroJLo[i]) continue;
-        const std::size_t n = static_cast<std::size_t>(zeroJHi[i] - zeroJLo[i] + 1) * sK;
-        std::fill_n(&s.accelX(i, zeroJLo[i], 0), n, 0.0);
-        std::fill_n(&s.accelY(i, zeroJLo[i], 0), n, 0.0);
-        std::fill_n(&s.accelZ(i, zeroJLo[i], 0), n, 0.0);
+        const int lo = plan.zeroJLo[i], hi = plan.zeroJHi[i];
+        if (hi < lo) continue;
+        if (plan.xJHi[i] < plan.xJLo[i]) { zeroRun(i, lo, hi); continue; }
+        if (plan.xJLo[i] > lo) zeroRun(i, lo, plan.xJLo[i] - 1);
+        if (plan.xJHi[i] < hi) zeroRun(i, plan.xJHi[i] + 1, hi);
     }
 
     // Temporary 1‑D arrays (logical index -1 .. maxDim+1) offset by +1.
@@ -152,10 +155,14 @@ void computeAccelerations(SimState& s)
                 VM2(qsieXK, i+1, k) = computeQsi(DPeFace, pipF, 0.5);
 
                 // Pass 2: diffusive part of Au, Av, Aw (first part)
+                // Assign, not accumulate: this is the first write to every cell
+                // in the X sweep's range, so the reset above skips them
+                // entirely -- three fields' worth of stores, and the read half
+                // of the read-modify-write, both gone.
                 const double coeff = invDx2;
-                s.accelX(i, j, k) += (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
-                s.accelY(i, j, k) += (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
-                s.accelZ(i, j, k) += (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
+                s.accelX(i, j, k) = (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
+                s.accelY(i, j, k) = (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
+                s.accelZ(i, j, k) = (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
 
                 // Pass 3: cross-term correction (K * qsi)
                 const double uCell = vx0;

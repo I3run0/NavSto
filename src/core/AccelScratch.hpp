@@ -35,10 +35,12 @@ struct AccelScratch {
     std::vector<double> qsieXK, KuXK, KvXK, KwXK;
     std::vector<double> ppiwRow;  ///< west coefficient carried from i-1 (or j-1)
 
-    /// Per-column j-span of the acceleration cells that need resetting each
-    /// call, from buildAccelZeroSpans(). Empty until the first call builds it;
-    /// geometry is not known yet when allocate() runs.
-    std::vector<int> zeroJLo, zeroJHi;
+    /// Which acceleration cells computeAccelerations has to reset, from
+    /// buildAccelResetPlan(). Empty until the first call builds it; geometry is
+    /// not known yet when allocate() runs. Per column i, [zeroJLo, zeroJHi] is
+    /// everything any sweep writes and [xJLo, xJHi] the part the X sweep
+    /// assigns outright, so only the two j-runs outside it need zeroing.
+    std::vector<int> zeroJLo, zeroJHi, xJLo, xJHi;
     int scratchKLen = 0;          ///< k-stride within one thread's (i,k) slice
     int xk2DLenPerThread = 0;     ///< one thread's slice length in the XK buffers
 
