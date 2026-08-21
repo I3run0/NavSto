@@ -224,9 +224,15 @@ __global__ void xSweepKernel(DeviceState d) {
     const int j = 1 + (int)(tid / KKfim);
     const int k = 1 + (int)(tid % KKfim);
 
-    const long long base = ((long long)(j - 1) * d.numCellsZ + (k - 1)) * d.scratchLen;
-    Real* ppie = d.ppieX + base; Real* ppiw = d.ppiwX + base; Real* qsie = d.qsieX + base;
-    Real* Ku = d.KuX + base; Real* Kv = d.KvX + base; Real* Kw = d.KwX + base;
+    // Scratch is indexed plane-major, [element * numThreads + slot], not
+    // slice-per-thread: adjacent threads differ by k, so this way their reads
+    // of the same element are adjacent in memory and coalesce into one
+    // transaction instead of one per lane 99 elements apart.
+    const long long slot = (long long)(j - 1) * d.numCellsZ + (k - 1);
+    const long long sstr = d.numThreadsX;
+    auto SC = [slot, sstr](Real* p, long long idx) -> Real& { return p[idx * sstr + slot]; };
+    Real* ppie = d.ppieX; Real* ppiw = d.ppiwX; Real* qsie = d.qsieX;
+    Real* Ku = d.KuX; Real* Kv = d.KvX; Real* Kw = d.KwX;
 
     const int iStart = d.iLow[j];
     const int iEnd = d.iHigh[j];
@@ -238,18 +244,18 @@ __global__ void xSweepKernel(DeviceState d) {
         const Real DPe = localRe * uFace * d.cellSizeX;
         Real pip, cip, cim;
         computeExponentialWeights(localRe, DPe, pip, cip, cim);
-        ppie[i + 1 + 1] = cip;
-        ppiw[i + 1 + 1 + 1] = cim;
-        qsie[i + 1 + 1] = computeQsi(DPe, pip, Real(0.5));
+        SC(ppie, i + 1 + 1) = cip;
+        SC(ppiw, i + 1 + 1 + 1) = cim;
+        SC(qsie, i + 1 + 1) = computeQsi(DPe, pip, Real(0.5));
     }
     for (int i = iStart + 1; i <= iEnd - 1; ++i) {
         const Real coeff = invDx2;
-        ACCX(d, i, j, k) += (ppie[i + 1 + 1] * (VELX(d, i + 1, j, k) - VELX(d, i, j, k))
-                            + ppiw[i + 1 + 1] * (VELX(d, i - 1, j, k) - VELX(d, i, j, k))) * coeff;
-        ACCY(d, i, j, k) += (ppie[i + 1 + 1] * (VELY(d, i + 1, j, k) - VELY(d, i, j, k))
-                            + ppiw[i + 1 + 1] * (VELY(d, i - 1, j, k) - VELY(d, i, j, k))) * coeff;
-        ACCZ(d, i, j, k) += (ppie[i + 1 + 1] * (VELZ(d, i + 1, j, k) - VELZ(d, i, j, k))
-                            + ppiw[i + 1 + 1] * (VELZ(d, i - 1, j, k) - VELZ(d, i, j, k))) * coeff;
+        ACCX(d, i, j, k) += (SC(ppie, i + 1 + 1) * (VELX(d, i + 1, j, k) - VELX(d, i, j, k))
+                            + SC(ppiw, i + 1 + 1) * (VELX(d, i - 1, j, k) - VELX(d, i, j, k))) * coeff;
+        ACCY(d, i, j, k) += (SC(ppie, i + 1 + 1) * (VELY(d, i + 1, j, k) - VELY(d, i, j, k))
+                            + SC(ppiw, i + 1 + 1) * (VELY(d, i - 1, j, k) - VELY(d, i, j, k))) * coeff;
+        ACCZ(d, i, j, k) += (SC(ppie, i + 1 + 1) * (VELZ(d, i + 1, j, k) - VELZ(d, i, j, k))
+                            + SC(ppiw, i + 1 + 1) * (VELZ(d, i - 1, j, k) - VELZ(d, i, j, k))) * coeff;
     }
     for (int i = iStart + 1; i <= iEnd - 1; ++i) {
         const Real localRe = 1.0 / effectiveInvRe(d, i);
@@ -258,25 +264,25 @@ __global__ void xSweepKernel(DeviceState d) {
         Real pip, cip, cim;
         computeExponentialWeights(localRe, DPe, pip, cip, cim);
         cip *= invDx2; cim *= invDx2;
-        Ku[i + 1 + 1] = cip * (VELX(d, i, j, k) - VELX(d, i + 1, j, k)) + cim * (VELX(d, i, j, k) - VELX(d, i - 1, j, k));
-        Kv[i + 1 + 1] = cip * (VELY(d, i, j, k) - VELY(d, i + 1, j, k)) + cim * (VELY(d, i, j, k) - VELY(d, i - 1, j, k));
-        Kw[i + 1 + 1] = cip * (VELZ(d, i, j, k) - VELZ(d, i + 1, j, k)) + cim * (VELZ(d, i, j, k) - VELZ(d, i - 1, j, k));
+        SC(Ku, i + 1 + 1) = cip * (VELX(d, i, j, k) - VELX(d, i + 1, j, k)) + cim * (VELX(d, i, j, k) - VELX(d, i - 1, j, k));
+        SC(Kv, i + 1 + 1) = cip * (VELY(d, i, j, k) - VELY(d, i + 1, j, k)) + cim * (VELY(d, i, j, k) - VELY(d, i - 1, j, k));
+        SC(Kw, i + 1 + 1) = cip * (VELZ(d, i, j, k) - VELZ(d, i + 1, j, k)) + cim * (VELZ(d, i, j, k) - VELZ(d, i - 1, j, k));
     }
-    Ku[iStart + 1 + 1] = 2.0 * Ku[iStart + 2 + 1] - Ku[iStart + 3 + 1];
-    Kv[iStart + 1 + 1] = 2.0 * Kv[iStart + 2 + 1] - Kv[iStart + 3 + 1];
-    Kw[iStart + 1 + 1] = 2.0 * Kw[iStart + 2 + 1] - Kw[iStart + 3 + 1];
-    Ku[iEnd + 1 + 1] = 2.0 * Ku[iEnd + 1] - Ku[iEnd - 1 + 1];
-    Kv[iEnd + 1 + 1] = 2.0 * Kv[iEnd + 1] - Kv[iEnd - 1 + 1];
-    Kw[iEnd + 1 + 1] = 2.0 * Kw[iEnd + 1] - Kw[iEnd - 1 + 1];
+    SC(Ku, iStart + 1 + 1) = 2.0 * SC(Ku, iStart + 2 + 1) - SC(Ku, iStart + 3 + 1);
+    SC(Kv, iStart + 1 + 1) = 2.0 * SC(Kv, iStart + 2 + 1) - SC(Kv, iStart + 3 + 1);
+    SC(Kw, iStart + 1 + 1) = 2.0 * SC(Kw, iStart + 2 + 1) - SC(Kw, iStart + 3 + 1);
+    SC(Ku, iEnd + 1 + 1) = 2.0 * SC(Ku, iEnd + 1) - SC(Ku, iEnd - 1 + 1);
+    SC(Kv, iEnd + 1 + 1) = 2.0 * SC(Kv, iEnd + 1) - SC(Kv, iEnd - 1 + 1);
+    SC(Kw, iEnd + 1 + 1) = 2.0 * SC(Kw, iEnd + 1) - SC(Kw, iEnd - 1 + 1);
     for (int i = iStart; i <= iEnd - 1; ++i) {
-        Ku[i + 1 + 1] = 0.5 * (Ku[i + 1 + 1] + Ku[i + 2 + 1]);
-        Kv[i + 1 + 1] = 0.5 * (Kv[i + 1 + 1] + Kv[i + 2 + 1]);
-        Kw[i + 1 + 1] = 0.5 * (Kw[i + 1 + 1] + Kw[i + 2 + 1]);
+        SC(Ku, i + 1 + 1) = 0.5 * (SC(Ku, i + 1 + 1) + SC(Ku, i + 2 + 1));
+        SC(Kv, i + 1 + 1) = 0.5 * (SC(Kv, i + 1 + 1) + SC(Kv, i + 2 + 1));
+        SC(Kw, i + 1 + 1) = 0.5 * (SC(Kw, i + 1 + 1) + SC(Kw, i + 2 + 1));
     }
     for (int i = iStart + 1; i <= iEnd - 1; ++i) {
-        ACCX(d, i, j, k) -= (Ku[i + 1 + 1] * qsie[i + 1 + 1] - Ku[i + 1] * qsie[i + 1]);
-        ACCY(d, i, j, k) -= (Kv[i + 1 + 1] * qsie[i + 1 + 1] - Kv[i + 1] * qsie[i + 1]);
-        ACCZ(d, i, j, k) -= (Kw[i + 1 + 1] * qsie[i + 1 + 1] - Kw[i + 1] * qsie[i + 1]);
+        ACCX(d, i, j, k) -= (SC(Ku, i + 1 + 1) * SC(qsie, i + 1 + 1) - SC(Ku, i + 1) * SC(qsie, i + 1));
+        ACCY(d, i, j, k) -= (SC(Kv, i + 1 + 1) * SC(qsie, i + 1 + 1) - SC(Kv, i + 1) * SC(qsie, i + 1));
+        ACCZ(d, i, j, k) -= (SC(Kw, i + 1 + 1) * SC(qsie, i + 1 + 1) - SC(Kw, i + 1) * SC(qsie, i + 1));
     }
 }
 
@@ -288,10 +294,12 @@ __global__ void ySweepKernel(DeviceState d) {
     const int i = 1 + (int)(tid / KKfim);
     const int k = 1 + (int)(tid % KKfim);
 
-    const long long base = ((long long)(i - 1) * d.numCellsZ + (k - 1)) * d.scratchLen;
-    Real* ppin = d.ppinY + base; Real* ppis = d.ppisY + base; Real* qsin = d.qsinY + base;
-    Real* Ku = d.KuY + base; Real* Kv = d.KvY + base; Real* Kw = d.KwY + base;
-    auto VM = [](Real* buf, int li) -> Real& { return buf[li + 1]; };
+    const long long slot = (long long)(i - 1) * d.numCellsZ + (k - 1);
+    const long long sstr = d.numThreadsY;
+    auto SC = [slot, sstr](Real* p, long long idx) -> Real& { return p[idx * sstr + slot]; };
+    Real* ppin = d.ppinY; Real* ppis = d.ppisY; Real* qsin = d.qsinY;
+    Real* Ku = d.KuY; Real* Kv = d.KvY; Real* Kw = d.KwY;
+    auto VM = [SC](Real* buf, int li) -> Real& { return SC(buf, li + 1); };
 
     const int jStart = d.jLow[i];
     const int jEnd = d.jHigh[i];
@@ -351,10 +359,12 @@ __global__ void zSweepKernel(DeviceState d) {
     if (i > d.numCellsXm1 || j < d.jLow[i] + 1 || j > d.jHigh[i] - 1) return;
 
     const int KKfim = d.periodic ? d.numCellsZ : d.numCellsZm1;
-    const long long base = tid * d.scratchLen;
-    Real* ppiu = d.ppiuZ + base; Real* ppid = d.ppidZ + base; Real* qsiu = d.qsiuZ + base;
-    Real* Ku = d.KuZ + base; Real* Kv = d.KvZ + base; Real* Kw = d.KwZ + base;
-    auto VM = [](Real* buf, int li) -> Real& { return buf[li + 1]; };
+    const long long slot = tid;
+    const long long sstr = d.numThreadsZ;
+    auto SC = [slot, sstr](Real* p, long long idx) -> Real& { return p[idx * sstr + slot]; };
+    Real* ppiu = d.ppiuZ; Real* ppid = d.ppidZ; Real* qsiu = d.qsiuZ;
+    Real* Ku = d.KuZ; Real* Kv = d.KvZ; Real* Kw = d.KwZ;
+    auto VM = [SC](Real* buf, int li) -> Real& { return SC(buf, li + 1); };
 
     const Real invDz2 = 1.0 / (d.cellSizeZ * d.cellSizeZ);
     const Real localRe = 1.0 / effectiveInvRe(d, i);
