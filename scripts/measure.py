@@ -163,8 +163,24 @@ def tier_headroom(args):
 
 # ── Baseline comparison ──────────────────────────────────────────────────────
 
+def _context(env):
+    """What has to match for two envelopes to be comparable at all."""
+    k = env.get("kernel", {})
+    return {"backend": env.get("backend"), "cpu": env.get("cpu"),
+            "grid": k.get("grid"), "threads": env.get("threads")}
+
+
 def compare(baseline, candidate):
     """Verdicts per kernel and per benchmark size, lower-is-better."""
+    # Kernel names are identical across backends and grids, so a mismatched
+    # baseline compares cleanly and reports nonsense -- a serial candidate
+    # against an OpenMP baseline reads as a large improvement.
+    b_ctx, c_ctx = _context(baseline), _context(candidate)
+    if b_ctx != c_ctx:
+        differs = {k: (b_ctx[k], c_ctx[k]) for k in b_ctx if b_ctx[k] != c_ctx[k]}
+        raise SystemExit(f"baseline is not comparable to this run: {differs} "
+                         f"(baseline {baseline.get('git_commit', '?')})")
+
     out = {"noise_k": NOISE_K, "kernels": {}, "reward": {}}
 
     b_k = {k["kernel"]: k for k in baseline.get("kernel", {}).get("kernels", [])}
@@ -219,7 +235,8 @@ def main():
         build(*targets, required=("navsolver",))
 
     wanted = TIER_SETS.get(args.tier, (args.tier,))
-    result = envelope(tool="measure", tier=args.tier, backend=args.backend)
+    result = envelope(tool="measure", tier=args.tier, backend=args.backend,
+                      threads=args.threads)
 
     runners = {"gate": tier_gate, "kernel": tier_kernel, "reward": tier_reward,
                "attribution": tier_attribution, "headroom": tier_headroom}

@@ -62,6 +62,26 @@ minima, so the smallest delta a `2 x noise` verdict can call):
 | OpenMP kernel, 192x96x48, 6 threads | 8–12% (small kernels 20–38%) | ~23%+ |
 | whole-program reward | 6–7% | ~13% |
 
+Two further hazards, both met in practice on 2026-08-21:
+
+- **A saved baseline is a different session, and this machine drifts more than
+  its within-session noise floor.** For anything under ~10%, decide with
+  `scripts/paired.py` — both arms in one session, alternating which runs first,
+  reported as the median of the paired ratios plus a win count. 7/7 pairs at
+  1.02x is a result; 4/7 at 1.05x is not. `measure.py --baseline` now refuses a
+  baseline whose backend, CPU, grid or thread count differs from the run.
+- **Two binaries differ in code layout as well as in the change.** Function
+  alignment alone moved an untouched kernel by 4% in a paired run. If a kernel
+  the change cannot reach moves consistently, that is layout: confirm by
+  putting both paths in one binary behind a runtime switch and pairing it
+  against itself.
+
+Grid choice for `kbench` on this machine: **96x48x24 is the trustworthy point**
+(untouched kernels sit at 1.000 in a layout-neutral pair), 144x72x36 is usable,
+and **240x120x60 is not** — at 7 GB of RAM its footprint puts kernels the change
+cannot touch anywhere between 0.76x and 1.47x. Production-size claims come from
+the whole-program tiers, not from kbench.
+
 The OpenMP kernel tier is a coarse instrument here and does not get better with
 more repeats — 9 repeats measured *worse* than 5, because the jitter is thread
 placement across heterogeneous cores, not sampling. So: prove a restructuring on
