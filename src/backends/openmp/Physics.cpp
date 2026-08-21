@@ -351,21 +351,16 @@ void computeAccelerations(SimState& s)
             VM2(KwXK, iEnd+1, k)   = 2.0*VM2(KwXK, iEnd, k)   - VM2(KwXK, iEnd-1, k);
         }
         // Average to faces
-        for (int i = iStart; i <= iEnd-1; ++i) {
-            for (int k = 1; k <= KKfim; ++k) {
-                VM2(KuXK, i+1, k) = 0.5*(VM2(KuXK, i+1, k) + VM2(KuXK, i+2, k));
-                VM2(KvXK, i+1, k) = 0.5*(VM2(KvXK, i+1, k) + VM2(KvXK, i+2, k));
-                VM2(KwXK, i+1, k) = 0.5*(VM2(KwXK, i+1, k) + VM2(KwXK, i+2, k));
-            }
-        }
+        for (int i = iStart; i <= iEnd-1; ++i)
+            faceAverageRow(&VM2(KuXK,i+1,1), &VM2(KvXK,i+1,1), &VM2(KwXK,i+1,1),
+                           &VM2(KuXK,i+2,1), &VM2(KvXK,i+2,1), &VM2(KwXK,i+2,1), KKfim);
+
         // Subtract cross‑term divergence
-        for (int i = iStart+1; i <= iEnd-1; ++i) {
-            for (int k = 1; k <= KKfim; ++k) {
-                s.accelX(i, j, k) -= (VM2(KuXK,i+1,k)*VM2(qsieXK,i+1,k) - VM2(KuXK,i,k)*VM2(qsieXK,i,k));
-                s.accelY(i, j, k) -= (VM2(KvXK,i+1,k)*VM2(qsieXK,i+1,k) - VM2(KvXK,i,k)*VM2(qsieXK,i,k));
-                s.accelZ(i, j, k) -= (VM2(KwXK,i+1,k)*VM2(qsieXK,i+1,k) - VM2(KwXK,i,k)*VM2(qsieXK,i,k));
-            }
-        }
+        for (int i = iStart+1; i <= iEnd-1; ++i)
+            crossTermRow(&s.accelX(i,j,1), &s.accelY(i,j,1), &s.accelZ(i,j,1),
+                         &VM2(KuXK,i+1,1), &VM2(KvXK,i+1,1), &VM2(KwXK,i+1,1), &VM2(qsieXK,i+1,1),
+                         &VM2(KuXK,i,1),   &VM2(KvXK,i,1),   &VM2(KwXK,i,1),   &VM2(qsieXK,i,1),
+                         KKfim);
     }
 
     // ---------- Direction Y ----------
@@ -445,20 +440,15 @@ void computeAccelerations(SimState& s)
             VM2(KvJK, jEnd+1, k)   = 2.0*VM2(KvJK, jEnd, k)   - VM2(KvJK, jEnd-1, k);
             VM2(KwJK, jEnd+1, k)   = 2.0*VM2(KwJK, jEnd, k)   - VM2(KwJK, jEnd-1, k);
         }
-        for (int j = jStart; j <= jEnd-1; ++j) {
-            for (int k = 1; k <= KKfim; ++k) {
-                VM2(KuJK, j+1, k) = 0.5*(VM2(KuJK, j+1, k) + VM2(KuJK, j+2, k));
-                VM2(KvJK, j+1, k) = 0.5*(VM2(KvJK, j+1, k) + VM2(KvJK, j+2, k));
-                VM2(KwJK, j+1, k) = 0.5*(VM2(KwJK, j+1, k) + VM2(KwJK, j+2, k));
-            }
-        }
-        for (int j = jStart+1; j <= jEnd-1; ++j) {
-            for (int k = 1; k <= KKfim; ++k) {
-                s.accelX(i, j, k) -= (VM2(KuJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KuJK,j,k)*VM2(qsinJK,j,k));
-                s.accelY(i, j, k) -= (VM2(KvJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KvJK,j,k)*VM2(qsinJK,j,k));
-                s.accelZ(i, j, k) -= (VM2(KwJK,j+1,k)*VM2(qsinJK,j+1,k) - VM2(KwJK,j,k)*VM2(qsinJK,j,k));
-            }
-        }
+        for (int j = jStart; j <= jEnd-1; ++j)
+            faceAverageRow(&VM2(KuJK,j+1,1), &VM2(KvJK,j+1,1), &VM2(KwJK,j+1,1),
+                           &VM2(KuJK,j+2,1), &VM2(KvJK,j+2,1), &VM2(KwJK,j+2,1), KKfim);
+
+        for (int j = jStart+1; j <= jEnd-1; ++j)
+            crossTermRow(&s.accelX(i,j,1), &s.accelY(i,j,1), &s.accelZ(i,j,1),
+                         &VM2(KuJK,j+1,1), &VM2(KvJK,j+1,1), &VM2(KwJK,j+1,1), &VM2(qsinJK,j+1,1),
+                         &VM2(KuJK,j,1),   &VM2(KvJK,j,1),   &VM2(KwJK,j,1),   &VM2(qsinJK,j,1),
+                         KKfim);
     }
 
     // ---------- Direction Z ----------

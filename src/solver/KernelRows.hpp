@@ -74,3 +74,33 @@ void velocityUpdateRow(const double* __restrict pa, const double* __restrict pb,
         vz[k] += (az[k] - dpw) * dtEff;
     }
 }
+
+// Face average of the three cross-term coefficient planes, in place. Same
+// reason as the rows above: written inline against the sweep's VM2 indexing
+// the compiler reports "evolution of base is not affine" and leaves it scalar.
+__attribute__((noinline)) inline
+void faceAverageRow(double* __restrict ku, double* __restrict kv, double* __restrict kw,
+                    const double* __restrict kuNext, const double* __restrict kvNext,
+                    const double* __restrict kwNext, int n)
+{
+    for (int k = 0; k < n; ++k) {
+        ku[k] = 0.5*(ku[k] + kuNext[k]);
+        kv[k] = 0.5*(kv[k] + kvNext[k]);
+        kw[k] = 0.5*(kw[k] + kwNext[k]);
+    }
+}
+
+// Cross-term divergence subtracted from the three acceleration rows.
+__attribute__((noinline)) inline
+void crossTermRow(double* __restrict ax, double* __restrict ay, double* __restrict az,
+                  const double* __restrict kuHi, const double* __restrict kvHi,
+                  const double* __restrict kwHi, const double* __restrict qHi,
+                  const double* __restrict kuLo, const double* __restrict kvLo,
+                  const double* __restrict kwLo, const double* __restrict qLo, int n)
+{
+    for (int k = 0; k < n; ++k) {
+        ax[k] -= (kuHi[k]*qHi[k] - kuLo[k]*qLo[k]);
+        ay[k] -= (kvHi[k]*qHi[k] - kvLo[k]*qLo[k]);
+        az[k] -= (kwHi[k]*qHi[k] - kwLo[k]*qLo[k]);
+    }
+}
