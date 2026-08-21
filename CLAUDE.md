@@ -92,6 +92,24 @@ the serial kernel tier, port it, and confirm the OpenMP side with
 that this machine cannot see. A sub-13% whole-program win is not provable here
 at all — say so rather than claiming it.
 
+### Check whether the kernel vectorises before tuning it
+
+```bash
+g++ -std=gnu++20 -O3 -DNDEBUG -march=native -funroll-loops -Isrc/core -Isrc/solver \
+    -Isrc/io -Isrc/backends/serial -Isrc/backends/host \
+    -c src/backends/serial/Physics.cpp -o /dev/null -fopt-info-vec-all
+```
+
+`buildPressureSource` was scalar — its 48 unit-stride loads per cell could not
+be vectorised because the store through `GridField::operator()` might, as far as
+the compiler knows, land on the fields' own `sJ`/`sK` members. Hoisting
+`__restrict` pointers and lifting the row into its own function made it 2.26x.
+Two traps found doing it: a `km` that wraps for periodic z is not affine in `k`
+and blocks the whole loop (peel that iteration), and a loop body in a lambda is
+outlined into an `isra` clone unless the vectorised form lives in a real
+function. Use the project's own flags in that command — plain `-O3` reports
+`V2DF` because it misses `-march=native`, which is a different question.
+
 ## Iteration protocol
 
 1. Baseline at HEAD (`--tier loop --save`) if there is not a current one.

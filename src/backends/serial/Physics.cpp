@@ -14,6 +14,7 @@
 #include "Physics.hpp"
 #include "Geometry.hpp"
 #include "PressureMultigrid.hpp"
+#include "PressureSourceRow.hpp"
 #include "Logger.hpp"
 #include "VelocityBCs.hpp"
 #include "ViscosityModel.hpp"
@@ -404,38 +405,49 @@ void buildPressureSource(SimState& s)
     const double qInvDz = 0.25 / cfg.cellSizeZ;
     const double invDt  = 1.0  / s.timeStepSize;
 
+    // Raw pointers and hoisted strides, because the accessor form does not
+    // vectorise: the compiler cannot prove the store misses the GridFields'
+    // own sJ/sK members, so the loads' base stops being loop-invariant and it
+    // gives up on a k-loop whose 48 loads are all unit-stride. Same
+    // expressions in the same association -- only the addressing changes.
+    const auto gs = s.velX.gridSize();
+    const std::size_t sJ = static_cast<std::size_t>(gs.sJ), sK = static_cast<std::size_t>(gs.sK);
+    const double* __restrict vx = s.velX.data().data();
+    const double* __restrict vy = s.velY.data().data();
+    const double* __restrict vz = s.velZ.data().data();
+    const double* __restrict ax = s.accelX.data().data();
+    const double* __restrict ay = s.accelY.data().data();
+    const double* __restrict az = s.accelZ.data().data();
+    double* __restrict psrc = s.pressureSource.data().data();
+
+    // k = 1 is peeled: with periodic z its km wraps to numCellsZ, and a km that
+    // is not affine in k stops the loop vectorising on its own.
+    const bool periodic = (cfg.lateralCondition == LateralBC::Periodic);
+
     for (int i = 1; i <= cfg.numCellsX; ++i) {
         const int im = i - 1;
         int jS, jN; activeJRange(s, i, jS, jN);
 
         for (int j = jS; j <= jN; ++j) {
             const int jm = j - 1;
-            for (int k = 1; k <= cfg.numCellsZ; ++k) {
-                int km = k - 1;
-                if (cfg.lateralCondition == LateralBC::Periodic && k == 1) km = cfg.numCellsZ;
+            // Row pointers for the four (i,j) corners: each is a contiguous
+            // run in k, so the loop below indexes them with a plain int and
+            // the accesses stay affine. Going through size_t index arithmetic
+            // instead left the vectoriser reporting "no vectype for stmt".
+            const std::size_t a = (static_cast<std::size_t>(i)  * sJ + j ) * sK;
+            const std::size_t b = (static_cast<std::size_t>(im) * sJ + j ) * sK;
+            const std::size_t c = (static_cast<std::size_t>(i)  * sJ + jm) * sK;
+            const std::size_t d = (static_cast<std::size_t>(im) * sJ + jm) * sK;
 
-                const double divU =
-                    (s.velX(i,j,k) - s.velX(im,j,k) + s.velX(i,jm,k) - s.velX(im,jm,k)
-                   + s.velX(i,j,km) - s.velX(im,j,km) + s.velX(i,jm,km) - s.velX(im,jm,km)) * qInvDx;
-                const double divV =
-                    (s.velY(i,j,k) - s.velY(i,jm,k) + s.velY(im,j,k) - s.velY(im,jm,k)
-                   + s.velY(i,j,km) - s.velY(i,jm,km) + s.velY(im,j,km) - s.velY(im,jm,km)) * qInvDy;
-                const double divW =
-                    (s.velZ(i,j,k) + s.velZ(i,jm,k) + s.velZ(im,j,k) + s.velZ(im,jm,k)
-                   - s.velZ(i,j,km) - s.velZ(i,jm,km) - s.velZ(im,j,km) - s.velZ(im,jm,km)) * qInvDz;
-
-                const double divAu =
-                    (s.accelX(i,j,k) - s.accelX(im,j,k) + s.accelX(i,jm,k) - s.accelX(im,jm,k)
-                   + s.accelX(i,j,km) - s.accelX(im,j,km) + s.accelX(i,jm,km) - s.accelX(im,jm,km)) * qInvDx;
-                const double divAv =
-                    (s.accelY(i,j,k) - s.accelY(i,jm,k) + s.accelY(im,j,k) - s.accelY(im,jm,k)
-                   + s.accelY(i,j,km) - s.accelY(i,jm,km) + s.accelY(im,j,km) - s.accelY(im,jm,km)) * qInvDy;
-                const double divAw =
-                    (s.accelZ(i,j,k) + s.accelZ(i,jm,k) + s.accelZ(im,j,k) + s.accelZ(im,jm,k)
-                   - s.accelZ(i,j,km) - s.accelZ(i,jm,km) - s.accelZ(im,j,km) - s.accelZ(im,jm,km)) * qInvDz;
-
-                s.pressureSource(i, j, k) = (divU + divV + divW) * invDt
-                                          + (divAu + divAv + divAw);
+            for (int pass = 0; pass < 2; ++pass) {
+                const int kFrom = pass ? 2 : 1;
+                const int kTo   = pass ? cfg.numCellsZ : 1;
+                const int kmOff = pass ? 1 : (periodic ? 1 - cfg.numCellsZ : 1);
+                pressureSourceRow(vx+a, vx+b, vx+c, vx+d, vy+a, vy+b, vy+c, vy+d,
+                                  vz+a, vz+b, vz+c, vz+d, ax+a, ax+b, ax+c, ax+d,
+                                  ay+a, ay+b, ay+c, ay+d, az+a, az+b, az+c, az+d,
+                                  psrc+a, kFrom, kTo, kmOff,
+                                  qInvDx, qInvDy, qInvDz, invDt);
             }
         }
     }

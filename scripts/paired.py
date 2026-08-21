@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import BENCH_ENV, KBENCH, REPO_ROOT  # noqa: E402
 
 
-def build_ref(ref, dest):
+def build_ref(ref, dest, target="navsolver_kbench"):
     """Build kbench from `ref` in a throwaway worktree, so the working tree is
     never stashed -- a crashed script must not leave the user's edits parked."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -48,8 +48,8 @@ def build_ref(ref, dest):
             subprocess.run(["cmake", "-S", str(tree), "-B", str(build),
                             "-DCMAKE_BUILD_TYPE=Release"], check=True, capture_output=True)
             subprocess.run(["cmake", "--build", str(build), "--target",
-                            "navsolver_kbench", "-j"], check=True, capture_output=True)
-            dest.write_bytes((build / "navsolver_kbench").read_bytes())
+                            target, "-j"], check=True, capture_output=True)
+            dest.write_bytes((build / target).read_bytes())
             dest.chmod(0o755)
         finally:
             subprocess.run(["git", "worktree", "remove", "--force", str(tree)],
@@ -71,7 +71,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", type=Path, help="baseline kbench binary")
     ap.add_argument("--base-ref", help="build the baseline from this git ref instead")
-    ap.add_argument("--cand", type=Path, default=KBENCH)
+    ap.add_argument("--cand", type=Path, default=None)
+    ap.add_argument("--target", default="navsolver_kbench",
+                    help="which kbench to build/compare (navsolver_kbench_omp for OpenMP)")
     ap.add_argument("--grid", default="96x48x24")
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--pairs", type=int, default=7)
@@ -80,16 +82,17 @@ def main():
     args = ap.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
+        cand = args.cand or (KBENCH.parent / args.target)
         base = args.base
         if args.base_ref:
-            base = build_ref(args.base_ref, Path(tmp) / "kbench_base")
+            base = build_ref(args.base_ref, Path(tmp) / "kbench_base", args.target)
         if not base:
             ap.error("pass --base or --base-ref")
 
         ratios, order = {}, []
         for p in range(args.pairs):
-            first = base if p % 2 == 0 else args.cand
-            second = args.cand if p % 2 == 0 else base
+            first = base if p % 2 == 0 else cand
+            second = cand if p % 2 == 0 else base
             a = run(first, args.grid, args.iters, args.threads)
             b = run(second, args.grid, args.iters, args.threads)
             bres, cres = (a, b) if p % 2 == 0 else (b, a)
