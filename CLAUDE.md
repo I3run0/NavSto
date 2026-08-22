@@ -18,6 +18,15 @@ as HEAD, everywhere measured**. Both halves are hard constraints:
   Validator tolerances, golden fields and convergence criteria are fixed inputs
   — never widen one to make a change pass. A change that moves a validated
   number is wrong until proven otherwise, even when it is faster.
+  The bar is *algebraically* identical, not byte-identical: FMA contraction may
+  appear or disappear when branches move, which changes the last bit and is an
+  improvement per operation, not a loss. Prove it is only that — rebuild both
+  sides with `-DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=native
+  -funroll-loops -ffp-contract=off"` and compare byte for byte — and say in the
+  commit how far the difference grows over a run. Anything that survives
+  `-ffp-contract=off` is a real change in the arithmetic and is not allowed.
+  When it does shift, every backend the validators cross-check has to shift
+  with it in the same commit, or `validate_parallel`'s 1e-10 equivalence fails.
 - **No configuration may get slower.** Every kernel and every benchmark size
   must come back `improved` or `within_noise`. One `regressed` rejects the whole
   change, however large the win elsewhere.
