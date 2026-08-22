@@ -492,6 +492,27 @@ static void gaussSeidelSweeps(SimState& s, int nSweeps)
                                   && (j == s.jLow[i]+1 || j == s.jHigh[i]);
                 const bool rowHasRef = (i == iRef && j == jRef);
 
+                // The common row mirrors nothing, holds no reference node and
+                // is not a corner, so every test in the general loop below is
+                // loop-invariant and false there. Run it without them, peeling
+                // the only two k that wrap or write a z ghost.
+                if (!mirrorW && !mirrorE && !mirrorS && !mirrorN
+                    && !corner && !rowHasRef && nZ >= 2) {
+                    auto plainCell = [&](int k, int km, int kp) {
+                        const double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
+                                          + cX*(s.press(ip,j,k) + s.press(im,j,k))
+                                          + cZ*(s.press(i,j,kp) + s.press(i,j,km))
+                                          - s.pressureSource(i,j,k)) * invDiag;
+                        s.press(i, j, k) += omega * (pNew - s.press(i, j, k));
+                    };
+                    if (solidWall) s.press(i, j, 0) = s.press(i, j, 1);
+                    plainCell(1, solidWall ? 0 : nZ, 2);
+                    for (int k = 2; k <= nZ-1; ++k) plainCell(k, k-1, k+1);
+                    if (solidWall) s.press(i, j, nZ+1) = s.press(i, j, nZ);
+                    plainCell(nZ, nZ-1, solidWall ? nZ+1 : 1);
+                    continue;
+                }
+
                 for (int k = 1; k <= nZ; ++k) {
                     int km = k-1, kp = k+1;
 

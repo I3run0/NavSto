@@ -132,6 +132,32 @@ void updateColor(SimState& s, const std::vector<RowIndex>& activeRows, RBColor c
         // (i+j+k) even => red. kStart is the smallest k in [1,2] with the
         // right (i+j+k) parity for this color; step 2 covers the rest.
         const int kStart = (((i + j) % 2) == wantParity) ? 2 : 1;
+
+        // The reference node and the corner correction are row-invariant, and
+        // only k = 1 and k = numCellsZ wrap. Hoisting both and peeling those
+        // two leaves a middle loop with nothing in it but the update -- the
+        // same restructuring the serial Gauss-Seidel got, and the same 1-ULP
+        // FMA contraction comes with it, which is why both backends have to
+        // move together.
+        const bool rowHasRef = (i == iRef && j == jRef);
+        const bool corner = (i==1 || i==cfg.numCellsX) && (j==s.jLow[i]+1 || j==s.jHigh[i]);
+        const bool wraps = (cfg.lateralCondition != LateralBC::SolidWall);
+        const int nZ = cfg.numCellsZ;
+        if (!rowHasRef && !corner && nZ >= 2) {
+            auto plainCell = [&](int k, int km, int kp) {
+                const double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
+                                  + cX*(s.press(ip,j,k) + s.press(im,j,k))
+                                  + cZ*(s.press(i,j,kp) + s.press(i,j,km))
+                                  - s.pressureSource(i,j,k)) * invDiag;
+                s.press(i, j, k) += cfg.sorOmega * (pNew - s.press(i, j, k));
+            };
+            int k = kStart;
+            if (k == 1) { plainCell(1, wraps ? nZ : 0, 2); k += 2; }
+            for (; k <= nZ - 1; k += 2) plainCell(k, k-1, k+1);
+            if (k == nZ) plainCell(nZ, nZ-1, wraps ? 1 : nZ+1);
+            continue;
+        }
+
         for (int k = kStart; k <= cfg.numCellsZ; k += 2) {
             int km = k-1, kp = k+1;
             if (cfg.lateralCondition != LateralBC::SolidWall) {
