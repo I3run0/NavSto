@@ -270,6 +270,21 @@ void computeAccelerations(SimState& s)
         double* KvXK   = s.ext.accel.KvXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
         double* KwXK   = s.ext.accel.KwXK.data()   + tid * s.ext.accel.xk2DLenPerThread;
 
+        // Operand rows for the vectorised weight evaluation, same slicing as
+        // rowBuf. wCis is the alternate south/west coefficient row the Y and
+        // X sweeps swap with ppiwRow after each j/i.
+        const int rowLenT = s.ext.accel.rowLenPerThread;
+        double* __restrict wNum   = s.ext.accel.wNum.data()   + tid * rowLenT;
+        double* __restrict wDen   = s.ext.accel.wDen.data()   + tid * rowLenT;
+        double* __restrict wDPe   = s.ext.accel.wDPe.data()   + tid * rowLenT;
+        double* __restrict wQMask = s.ext.accel.wQMask.data() + tid * rowLenT;
+        double* __restrict wQDen  = s.ext.accel.wQDen.data()  + tid * rowLenT;
+        double* __restrict wQAdd  = s.ext.accel.wQAdd.data()  + tid * rowLenT;
+        double* __restrict wNumC  = s.ext.accel.wNumC.data()  + tid * rowLenT;
+        double* __restrict wDenC  = s.ext.accel.wDenC.data()  + tid * rowLenT;
+        double* __restrict wDPeC  = s.ext.accel.wDPeC.data()  + tid * rowLenT;
+        double* __restrict wCisB  = s.ext.accel.wCis.data()   + tid * rowLenT;
+
     // ---------- Direction X ----------
     // Restructured (docs/serial-optimization-loop-order.md) to loop
     // pass-major -- all i, all k, per pass -- instead of the original
@@ -324,48 +339,34 @@ void computeAccelerations(SimState& s)
                 VM2(qsieXK, i+1, k) = computeQsi(DPe, pip, 0.5);
             }
         }
+        // The west coefficient alternates between two rows instead of being
+        // updated in place, so xSweepRow's operands can all be restrict.
+        double* __restrict pW = ppiwRow;
+        double* __restrict pE = wCisB;
         for (int i = iStart+1; i <= iEnd-1; ++i) {
             const double localRe = 1.0 / effectiveInvRe(s, i);
+            // Scalar pass: the branch chain and the exp, nothing else. The
+            // divisions all moved into xSweepRow, where they vectorise.
             for (int k = 1; k <= KKfim; ++k) {
-                // One load of each field per (i,k), shared by all three passes.
-                const double vxm = s.velX(i-1,j,k), vx0 = s.velX(i,j,k), vxp = s.velX(i+1,j,k);
-                const double vym = s.velY(i-1,j,k), vy0 = s.velY(i,j,k), vyp = s.velY(i+1,j,k);
-                const double vzm = s.velZ(i-1,j,k), vz0 = s.velZ(i,j,k), vzp = s.velZ(i+1,j,k);
-
-                // Pass 1: face coefficients (between i and i+1)
-                const double uFace = 0.5 * (vxp + vx0);
+                const double uFace = 0.5 * (s.velX(i+1,j,k) + s.velX(i,j,k));
                 const double DPeFace = localRe * uFace * cfg.cellSizeX;
-                double pipF, cipF, cimF;
-                computeExponentialWeights(localRe, DPeFace, pipF, cipF, cimF);
-                // Read the carried value BEFORE overwriting the slot: this row
-                // holds i-1's west coefficient, and pass 1 is about to replace
-                // it with i+1's.
-                const double ppiw = ppiwRow[k-1];
-                ppiwRow[k-1] = cimF;
-                const double ppie = cipF;                // consumed this iteration
-                VM2(qsieXK, i+1, k) = computeQsi(DPeFace, pipF, 0.5);
+                wDPe[k] = DPeFace;
+                weightOperands(DPeFace, 0.5, wNum[k], wDen[k], wQMask[k], wQDen[k], wQAdd[k]);
 
-                // Pass 2: diffusive part of Au, Av, Aw (first part)
-                // Assign, not accumulate: this is the first write to every cell
-                // in the X sweep's range, so the reset above skips them
-                // entirely -- three fields' worth of stores, and the read half
-                // of the read-modify-write, both gone.
-                const double coeff = invDx2;
-                s.accelX(i, j, k) = (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
-                s.accelY(i, j, k) = (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
-                s.accelZ(i, j, k) = (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
-
-                // Pass 3: cross-term correction (K * qsi)
-                const double uCell = vx0;
-                const double DPeCell = localRe * uCell * cfg.cellSizeX;
-                double pipC, cipC, cimC;
-                computeExponentialWeights(localRe, DPeCell, pipC, cipC, cimC);
-                cipC *= invDx2;
-                cimC *= invDx2;
-                VM2(KuXK, i+1, k) = cipC*(vx0-vxp) + cimC*(vx0-vxm);
-                VM2(KvXK, i+1, k) = cipC*(vy0-vyp) + cimC*(vy0-vym);
-                VM2(KwXK, i+1, k) = cipC*(vz0-vzp) + cimC*(vz0-vzm);
+                const double DPeCell = localRe * s.velX(i,j,k) * cfg.cellSizeX;
+                wDPeC[k] = DPeCell;
+                expWeightOperands(DPeCell, wNumC[k], wDenC[k]);
             }
+            xSweepRow(&s.accelX(i,j,1), &s.accelY(i,j,1), &s.accelZ(i,j,1),
+                      &s.velX(i-1,j,1), &s.velX(i,j,1), &s.velX(i+1,j,1),
+                      &s.velY(i-1,j,1), &s.velY(i,j,1), &s.velY(i+1,j,1),
+                      &s.velZ(i-1,j,1), &s.velZ(i,j,1), &s.velZ(i+1,j,1),
+                      wNum+1, wDen+1, wDPe+1, wQMask+1, wQDen+1, wQAdd+1,
+                      wNumC+1, wDenC+1, wDPeC+1,
+                      pW, pE, &VM2(qsieXK, i+1, 1),
+                      &VM2(KuXK, i+1, 1), &VM2(KvXK, i+1, 1), &VM2(KwXK, i+1, 1),
+                      KKfim, invDx2, localRe);
+            std::swap(pW, pE);
         }
         // Extrapolate Ku,Kv,Kw at boundaries -- per k, unchanged formula
         for (int k = 1; k <= KKfim; ++k) {
@@ -424,39 +425,32 @@ void computeAccelerations(SimState& s)
                 VM2(qsinJK, j+1, k) = computeQsi(DPe, pip, 0.5);
             }
         }
+        // The south coefficient alternates between two rows instead of being
+        // updated in place, so ySweepRow's operands can all be restrict.
+        double* __restrict pS = ppiwRow;
+        double* __restrict pN = wCisB;
         for (int j = jStart+1; j <= jEnd-1; ++j) {
+            // Scalar pass: the branch chain and the exp, nothing else.
             for (int k = 1; k <= KKfim; ++k) {
-                // One load of each field per (j,k), shared by all three passes.
-                const double vxm = s.velX(i,j-1,k), vx0 = s.velX(i,j,k), vxp = s.velX(i,j+1,k);
-                const double vym = s.velY(i,j-1,k), vy0 = s.velY(i,j,k), vyp = s.velY(i,j+1,k);
-                const double vzm = s.velZ(i,j-1,k), vz0 = s.velZ(i,j,k), vzp = s.velZ(i,j+1,k);
-
-                // Pass 1: face coefficients (between j and j+1)
-                const double vFace = 0.5 * (vyp + vy0);
+                const double vFace = 0.5 * (s.velY(i,j+1,k) + s.velY(i,j,k));
                 const double DPeFace = localRe * vFace * cfg.cellSizeY;
-                double pipF, cinF, cisF;
-                computeExponentialWeights(localRe, DPeFace, pipF, cinF, cisF);
-                const double ppis = ppiwRow[k-1];        // carried from j-1
-                ppiwRow[k-1] = cisF;                     // for j+1
-                const double ppin = cinF;                // consumed this iteration
-                VM2(qsinJK, j+1, k) = computeQsi(DPeFace, pipF, 0.5);
+                wDPe[k] = DPeFace;
+                weightOperands(DPeFace, 0.5, wNum[k], wDen[k], wQMask[k], wQDen[k], wQAdd[k]);
 
-                // Pass 2: diffusive part of Au, Av, Aw
-                const double coeff = invDy2;
-                s.accelX(i, j, k) += (ppin*(vxp-vx0) + ppis*(vxm-vx0)) * coeff;
-                s.accelY(i, j, k) += (ppin*(vyp-vy0) + ppis*(vym-vy0)) * coeff;
-                s.accelZ(i, j, k) += (ppin*(vzp-vz0) + ppis*(vzm-vz0)) * coeff;
-
-                // Pass 3: cross-term correction (K * qsi)
-                const double vCell = vy0;
-                const double DPeCell = localRe * vCell * cfg.cellSizeY;
-                double pipC, cinC, cisC;
-                computeExponentialWeights(localRe, DPeCell, pipC, cinC, cisC);
-                cinC *= invDy2;  cisC *= invDy2;
-                VM2(KuJK, j+1, k) = cinC*(vx0-vxp) + cisC*(vx0-vxm);
-                VM2(KvJK, j+1, k) = cinC*(vy0-vyp) + cisC*(vy0-vym);
-                VM2(KwJK, j+1, k) = cinC*(vz0-vzp) + cisC*(vz0-vzm);
+                const double DPeCell = localRe * s.velY(i,j,k) * cfg.cellSizeY;
+                wDPeC[k] = DPeCell;
+                expWeightOperands(DPeCell, wNumC[k], wDenC[k]);
             }
+            ySweepRow(&s.accelX(i,j,1), &s.accelY(i,j,1), &s.accelZ(i,j,1),
+                      &s.velX(i,j-1,1), &s.velX(i,j,1), &s.velX(i,j+1,1),
+                      &s.velY(i,j-1,1), &s.velY(i,j,1), &s.velY(i,j+1,1),
+                      &s.velZ(i,j-1,1), &s.velZ(i,j,1), &s.velZ(i,j+1,1),
+                      wNum+1, wDen+1, wDPe+1, wQMask+1, wQDen+1, wQAdd+1,
+                      wNumC+1, wDenC+1, wDPeC+1,
+                      pS, pN, &VM2(qsinJK, j+1, 1),
+                      &VM2(KuJK, j+1, 1), &VM2(KvJK, j+1, 1), &VM2(KwJK, j+1, 1),
+                      KKfim, invDy2, localRe);
+            std::swap(pS, pN);
         }
         for (int k = 1; k <= KKfim; ++k) {
             VM2(KuJK, jStart+1, k) = 2.0*VM2(KuJK, jStart+2, k) - VM2(KuJK, jStart+3, k);
@@ -512,7 +506,17 @@ void computeAccelerations(SimState& s)
                 VM(ppid, kp+1) = cid;
                 VM(qsiu, k+1) = computeQsi(DPe, pip, 0.5);
             };
-            for (int k = 0; k <= zP1Hi; ++k) zPassOne(k, k+1);
+            // Split in two: a scalar pass that only selects operands -- the
+            // branch chain and the exp live there -- and a division pass with
+            // no control flow, which vectorises. See docs/roofline.md.
+            for (int k = 0; k <= zP1Hi; ++k) {
+                const double wFace = 0.5 * (s.velZ(i, j, k+1) + s.velZ(i, j, k));
+                const double DPe = localRe * wFace * cfg.cellSizeZ;
+                wDPe[k] = DPe;
+                weightOperands(DPe, 0.5, wNum[k], wDen[k], wQMask[k], wQDen[k], wQAdd[k]);
+            }
+            weightDivideRow(wNum, wDen, wDPe, wQMask, wQDen, wQAdd,
+                            &VM(ppiu,1), &VM(ppid,2), &VM(qsiu,1), zP1Hi + 1, localRe);
             if (periodic) zPassOne(cfg.numCellsZ, 1);
 
             // Passes 2 and 3 fused: both read velX/velY/velZ at km, k and kp,
@@ -552,7 +556,21 @@ void computeAccelerations(SimState& s)
                 VM(Kw, k+1) = ciu*(vz0-vzp) + cid*(vz0-vzm);
             };
             if (periodic) zPassTwoThree(1, cfg.numCellsZ == 1 ? 1 : 2, cfg.numCellsZ);
-            for (int k = zP23Lo; k <= zP23Hi; ++k) zPassTwoThree(k, k+1, k-1);
+            // Same split for pass 3, whose divisions fuse into the stencil row
+            // rather than forming a pass of their own -- at short rows the
+            // extra call and scratch round-trip cost more than they return.
+            for (int k = zP23Lo; k <= zP23Hi; ++k) {
+                const double DPe = localRe * s.velZ(i,j,k) * cfg.cellSizeZ;
+                wDPe[k] = DPe;
+                expWeightOperands(DPe, wNum[k], wDen[k]);
+            }
+            if (zP23Hi >= zP23Lo)
+                zDiffusionCrossRow(&s.accelX(i,j,zP23Lo), &s.accelY(i,j,zP23Lo), &s.accelZ(i,j,zP23Lo),
+                                   &s.velX(i,j,zP23Lo), &s.velY(i,j,zP23Lo), &s.velZ(i,j,zP23Lo),
+                                   &VM(ppiu,zP23Lo+1), &VM(ppid,zP23Lo+1),
+                                   wNum + zP23Lo, wDen + zP23Lo, wDPe + zP23Lo,
+                                   &VM(Ku,zP23Lo+1), &VM(Kv,zP23Lo+1), &VM(Kw,zP23Lo+1),
+                                   zP23Hi - zP23Lo + 1, invDz2, localRe);
             if (periodic && cfg.numCellsZ > 1)
                 zPassTwoThree(cfg.numCellsZ, 1, cfg.numCellsZ-1);
 
