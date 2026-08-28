@@ -107,6 +107,61 @@ void crossTermRow(double* __restrict ax, double* __restrict ay, double* __restri
     }
 }
 
+// Z-sweep passes 2 and 3 for one k-row, doing pass 3's divisions inline.
+// Fusing them saves a row-kernel call and two scratch round-trips per (i,j);
+// split out they cost more than the vectorisation bought at short rows.
+// Nothing branches, so the divisions and the stencil vectorise together.
+__attribute__((noinline)) inline
+void zDiffusionCrossRow(double* __restrict ax, double* __restrict ay, double* __restrict az,
+                        const double* __restrict vx, const double* __restrict vy,
+                        const double* __restrict vz,
+                        const double* __restrict ppiu, const double* __restrict ppid,
+                        const double* __restrict num, const double* __restrict den,
+                        const double* __restrict dpe,
+                        double* __restrict ku, double* __restrict kv, double* __restrict kw,
+                        int n, double coeff, double localRe)
+{
+    for (int t = 0; t < n; ++t) {
+        const double vxm = vx[t-1], vx0 = vx[t], vxp = vx[t+1];
+        const double vym = vy[t-1], vy0 = vy[t], vyp = vy[t+1];
+        const double vzm = vz[t-1], vz0 = vz[t], vzp = vz[t+1];
+
+        const double ppiuK = ppiu[t], ppidK = ppid[t];
+        ax[t] += (ppiuK*(vxp-vx0) + ppidK*(vxm-vx0)) * coeff;
+        ay[t] += (ppiuK*(vyp-vy0) + ppidK*(vym-vy0)) * coeff;
+        az[t] += (ppiuK*(vzp-vz0) + ppidK*(vzm-vz0)) * coeff;
+
+        const double pip = num[t] / den[t];
+        const double pim = dpe[t] + pip;
+        const double ciuK = (pip / localRe) * coeff;
+        const double cidK = (pim / localRe) * coeff;
+        ku[t] = ciuK*(vx0-vxp) + cidK*(vx0-vxm);
+        kv[t] = ciuK*(vy0-vyp) + cidK*(vy0-vym);
+        kw[t] = ciuK*(vz0-vzp) + cidK*(vz0-vzm);
+    }
+}
+
+// The division half of the UNIFAES weight evaluation, one k-row at a time.
+// The caller's scalar pass picked every operand, so nothing here branches and
+// all four divisions vectorise -- which is the point: they are ~29% of
+// computeAccelerations and were scalar only because the branch chain they sat
+// inside blocked the loop. See docs/roofline.md.
+__attribute__((noinline)) inline
+void weightDivideRow(const double* __restrict num, const double* __restrict den,
+                     const double* __restrict dpe, const double* __restrict qMask,
+                     const double* __restrict qDen, const double* __restrict qAdd,
+                     double* __restrict cEast, double* __restrict cWest,
+                     double* __restrict qsi, int n, double localRe)
+{
+    for (int t = 0; t < n; ++t) {
+        const double pip = num[t] / den[t];
+        const double pim = dpe[t] + pip;
+        cEast[t] = pip / localRe;
+        cWest[t] = pim / localRe;
+        qsi[t]   = ((pip - 1.0) * qMask[t]) / qDen[t] + qAdd[t];
+    }
+}
+
 // One k-row of computeDivergence's 8-corner divergence, into a scratch row.
 // The kernel's reductions must stay scalar and in order to keep the sums
 // bit-identical; only the stencil moves here, where it vectorises.

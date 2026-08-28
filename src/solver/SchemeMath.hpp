@@ -44,6 +44,43 @@ NAVSOLVER_HD inline void computeExponentialWeights(T localRe, T DPe,
     coeffWest = pim / localRe;
 }
 
+/// The branch half of computeExponentialWeights, without its division: picks
+/// pip's numerator and denominator so a caller can divide in a vectorised
+/// pass. Bit-identical, because the two branches that do not divide can be
+/// written as exact quotients -- 0/1 and (-DPe)/1 are both exact.
+template <typename T>
+NAVSOLVER_HD inline void expWeightOperands(T DPe, T& num, T& den)
+{
+    if (fabs(DPe) < T(0.1)) {
+        num = T(1);
+        den = (((T(0.05)*DPe + T(0.25))*DPe + T(1))*DPe/T(6) + T(0.5))*DPe + T(1);
+    } else if (fabs(DPe) <= T(200)) {
+        num = DPe;  den = exp(DPe) - T(1);
+    } else if (DPe > T(200)) {
+        num = T(0); den = T(1);
+    } else {
+        num = -DPe; den = T(1);
+    }
+}
+
+/// expWeightOperands plus computeQsi's, so one scalar pass feeds one division
+/// pass. qsi comes back as (pip - 1)*qMask/qDen + qAdd: the near-zero branch
+/// sets qMask to 0 and carries its whole value in qAdd, which is exact for
+/// the same reason as above.
+template <typename T>
+NAVSOLVER_HD inline void weightOperands(T DPe, T xeOverDx, T& num, T& den,
+                                        T& qMask, T& qDen, T& qAdd)
+{
+    expWeightOperands(DPe, num, den);
+
+    if (fabs(DPe) < T(0.01)) {
+        qMask = T(0); qDen = T(1);
+        qAdd  = DPe * (T(1) - DPe * DPe / T(60)) / T(12) + xeOverDx - T(0.5);
+    } else {
+        qMask = T(1); qDen = DPe; qAdd = xeOverDx;
+    }
+}
+
 /// UNIFAES cross-term blending weight ξ.
 template <typename T>
 NAVSOLVER_HD inline T computeQsi(T DPe, T pip, T xeOverDx)

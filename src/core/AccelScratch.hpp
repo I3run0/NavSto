@@ -46,6 +46,11 @@ struct AccelScratch {
     /// computeDivergence and computeMomentumResidual write their per-cell
     /// value here so the stencil can vectorise, then reduce it in order.
     std::vector<double> rowBuf;
+
+    /// Operand rows for the vectorised weight evaluation: the scalar pass
+    /// writes pip's (num, den), DPe, and computeQsi's (mask, den, add) here,
+    /// and weightDivideRow reads them. Same slicing as rowBuf.
+    std::vector<double> wNum, wDen, wDPe, wQMask, wQDen, wQAdd;
     int rowLenPerThread = 0;
     int scratchKLen = 0;          ///< k-stride within one thread's (i,k) slice
     int xk2DLenPerThread = 0;     ///< one thread's slice length in the XK buffers
@@ -85,5 +90,9 @@ struct AccelScratch {
         const std::size_t rowLen = padTo8(static_cast<std::size_t>(cfg.numCellsZ) + 2);
         rowLenPerThread = static_cast<int>(rowLen);
         rowBuf.assign(rowLen * static_cast<std::size_t>(numThreads), 0.0);
+        const std::size_t wTotal = rowLen * static_cast<std::size_t>(numThreads);
+        wNum  .assign(wTotal, 0.0); wDen .assign(wTotal, 0.0);
+        wDPe  .assign(wTotal, 0.0); wQMask.assign(wTotal, 0.0);
+        wQDen .assign(wTotal, 1.0); wQAdd .assign(wTotal, 0.0);
     }
 };

@@ -66,6 +66,12 @@ void computeAccelerations(SimState& s)
     // instead of being allocated fresh every call — see AccelScratch.hpp for why
     // that's safe without re-zeroing.
     auto& ppiu = s.ext.accel.ppiu; auto& ppid = s.ext.accel.ppid;
+    double* __restrict wNum = s.ext.accel.wNum.data();
+    double* __restrict wDen = s.ext.accel.wDen.data();
+    double* __restrict wDPe = s.ext.accel.wDPe.data();
+    double* __restrict wQMask = s.ext.accel.wQMask.data();
+    double* __restrict wQDen = s.ext.accel.wQDen.data();
+    double* __restrict wQAdd = s.ext.accel.wQAdd.data();
     auto& qsiu = s.ext.accel.qsiu;
     auto& Ku = s.ext.accel.Ku; auto& Kv = s.ext.accel.Kv; auto& Kw = s.ext.accel.Kw;
 
@@ -313,7 +319,19 @@ void computeAccelerations(SimState& s)
                 VM(ppid, kp+1) = cid;
                 VM(qsiu, k+1) = computeQsi(DPe, pip, 0.5);
             };
-            for (int k = 0; k <= zP1Hi; ++k) zPassOne(k, k+1);
+            // Split in two: a scalar pass that only selects operands -- the
+            // branch chain and the exp live there -- and a division pass with
+            // no control flow, which vectorises. The four divisions are ~29%
+            // of this kernel and were scalar only because the branches around
+            // them blocked the loop; see docs/roofline.md.
+            for (int k = 0; k <= zP1Hi; ++k) {
+                const double wFace = 0.5 * (s.velZ(i, j, k+1) + s.velZ(i, j, k));
+                const double DPe = localRe * wFace * cfg.cellSizeZ;
+                wDPe[k] = DPe;
+                weightOperands(DPe, 0.5, wNum[k], wDen[k], wQMask[k], wQDen[k], wQAdd[k]);
+            }
+            weightDivideRow(wNum, wDen, wDPe, wQMask, wQDen, wQAdd,
+                            &VM(ppiu,1), &VM(ppid,2), &VM(qsiu,1), zP1Hi + 1, localRe);
             if (periodic) zPassOne(cfg.numCellsZ, 1);
 
             // Passes 2 and 3 fused: both read velX/velY/velZ at km, k and kp,
@@ -353,7 +371,20 @@ void computeAccelerations(SimState& s)
                 VM(Kw, k+1) = ciu*(vz0-vzp) + cid*(vz0-vzm);
             };
             if (periodic) zPassTwoThree(1, cfg.numCellsZ == 1 ? 1 : 2, cfg.numCellsZ);
-            for (int k = zP23Lo; k <= zP23Hi; ++k) zPassTwoThree(k, k+1, k-1);
+            // Same split for pass 3, which needs no qsi and scales both
+            // coefficients by 1/dz^2 exactly where the fused body did.
+            for (int k = zP23Lo; k <= zP23Hi; ++k) {
+                const double DPe = localRe * s.velZ(i,j,k) * cfg.cellSizeZ;
+                wDPe[k] = DPe;
+                expWeightOperands(DPe, wNum[k], wDen[k]);
+            }
+            if (zP23Hi >= zP23Lo)
+                zDiffusionCrossRow(&s.accelX(i,j,zP23Lo), &s.accelY(i,j,zP23Lo), &s.accelZ(i,j,zP23Lo),
+                                   &s.velX(i,j,zP23Lo), &s.velY(i,j,zP23Lo), &s.velZ(i,j,zP23Lo),
+                                   &VM(ppiu,zP23Lo+1), &VM(ppid,zP23Lo+1),
+                                   wNum + zP23Lo, wDen + zP23Lo, wDPe + zP23Lo,
+                                   &VM(Ku,zP23Lo+1), &VM(Kv,zP23Lo+1), &VM(Kw,zP23Lo+1),
+                                   zP23Hi - zP23Lo + 1, invDz2, localRe);
             if (periodic && cfg.numCellsZ > 1)
                 zPassTwoThree(cfg.numCellsZ, 1, cfg.numCellsZ-1);
 
