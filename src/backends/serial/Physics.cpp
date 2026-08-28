@@ -72,6 +72,9 @@ void computeAccelerations(SimState& s)
     double* __restrict wQMask = s.ext.accel.wQMask.data();
     double* __restrict wQDen = s.ext.accel.wQDen.data();
     double* __restrict wQAdd = s.ext.accel.wQAdd.data();
+    double* __restrict wNumC = s.ext.accel.wNumC.data();
+    double* __restrict wDenC = s.ext.accel.wDenC.data();
+    double* __restrict wDPeC = s.ext.accel.wDPeC.data();
     auto& qsiu = s.ext.accel.qsiu;
     auto& Ku = s.ext.accel.Ku; auto& Kv = s.ext.accel.Kv; auto& Kw = s.ext.accel.Kw;
 
@@ -237,39 +240,32 @@ void computeAccelerations(SimState& s)
                 VM2(qsinJK, j+1, k) = computeQsi(DPe, pip, 0.5);
             }
         }
+        // The south coefficient alternates between two rows instead of being
+        // updated in place, so ySweepRow's operands can all be restrict.
+        double* __restrict pS = ppiwRow.data();
+        double* __restrict pN = s.ext.accel.wCis.data();
         for (int j = jStart+1; j <= jEnd-1; ++j) {
+            // Scalar pass: the branch chain and the exp, nothing else.
             for (int k = 1; k <= KKfim; ++k) {
-                // One load of each field per (j,k), shared by all three passes.
-                const double vxm = s.velX(i,j-1,k), vx0 = s.velX(i,j,k), vxp = s.velX(i,j+1,k);
-                const double vym = s.velY(i,j-1,k), vy0 = s.velY(i,j,k), vyp = s.velY(i,j+1,k);
-                const double vzm = s.velZ(i,j-1,k), vz0 = s.velZ(i,j,k), vzp = s.velZ(i,j+1,k);
-
-                // Pass 1: face coefficients (between j and j+1)
-                const double vFace = 0.5 * (vyp + vy0);
+                const double vFace = 0.5 * (s.velY(i,j+1,k) + s.velY(i,j,k));
                 const double DPeFace = localRe * vFace * cfg.cellSizeY;
-                double pipF, cinF, cisF;
-                computeExponentialWeights(localRe, DPeFace, pipF, cinF, cisF);
-                const double ppis = ppiwRow[k-1];        // carried from j-1
-                ppiwRow[k-1] = cisF;                     // for j+1
-                const double ppin = cinF;                // consumed this iteration
-                VM2(qsinJK, j+1, k) = computeQsi(DPeFace, pipF, 0.5);
+                wDPe[k] = DPeFace;
+                weightOperands(DPeFace, 0.5, wNum[k], wDen[k], wQMask[k], wQDen[k], wQAdd[k]);
 
-                // Pass 2: diffusive part of Au, Av, Aw
-                const double coeff = invDy2;
-                s.accelX(i, j, k) += (ppin*(vxp-vx0) + ppis*(vxm-vx0)) * coeff;
-                s.accelY(i, j, k) += (ppin*(vyp-vy0) + ppis*(vym-vy0)) * coeff;
-                s.accelZ(i, j, k) += (ppin*(vzp-vz0) + ppis*(vzm-vz0)) * coeff;
-
-                // Pass 3: cross-term correction (K * qsi)
-                const double vCell = vy0;
-                const double DPeCell = localRe * vCell * cfg.cellSizeY;
-                double pipC, cinC, cisC;
-                computeExponentialWeights(localRe, DPeCell, pipC, cinC, cisC);
-                cinC *= invDy2;  cisC *= invDy2;
-                VM2(KuJK, j+1, k) = cinC*(vx0-vxp) + cisC*(vx0-vxm);
-                VM2(KvJK, j+1, k) = cinC*(vy0-vyp) + cisC*(vy0-vym);
-                VM2(KwJK, j+1, k) = cinC*(vz0-vzp) + cisC*(vz0-vzm);
+                const double DPeCell = localRe * s.velY(i,j,k) * cfg.cellSizeY;
+                wDPeC[k] = DPeCell;
+                expWeightOperands(DPeCell, wNumC[k], wDenC[k]);
             }
+            ySweepRow(&s.accelX(i,j,1), &s.accelY(i,j,1), &s.accelZ(i,j,1),
+                      &s.velX(i,j-1,1), &s.velX(i,j,1), &s.velX(i,j+1,1),
+                      &s.velY(i,j-1,1), &s.velY(i,j,1), &s.velY(i,j+1,1),
+                      &s.velZ(i,j-1,1), &s.velZ(i,j,1), &s.velZ(i,j+1,1),
+                      wNum+1, wDen+1, wDPe+1, wQMask+1, wQDen+1, wQAdd+1,
+                      wNumC+1, wDenC+1, wDPeC+1,
+                      pS, pN, &VM2(qsinJK, j+1, 1),
+                      &VM2(KuJK, j+1, 1), &VM2(KvJK, j+1, 1), &VM2(KwJK, j+1, 1),
+                      KKfim, invDy2, localRe);
+            std::swap(pS, pN);
         }
         for (int k = 1; k <= KKfim; ++k) {
             VM2(KuJK, jStart+1, k) = 2.0*VM2(KuJK, jStart+2, k) - VM2(KuJK, jStart+3, k);

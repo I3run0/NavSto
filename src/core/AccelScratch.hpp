@@ -51,6 +51,9 @@ struct AccelScratch {
     /// writes pip's (num, den), DPe, and computeQsi's (mask, den, add) here,
     /// and weightDivideRow reads them. Same slicing as rowBuf.
     std::vector<double> wNum, wDen, wDPe, wQMask, wQDen, wQAdd;
+    /// The cell-centred evaluation's operands (the sweeps' pass 3), and the
+    /// south/west coefficient row the Y and X sweeps carry to the next j/i.
+    std::vector<double> wNumC, wDenC, wDPeC, wCis;
     int rowLenPerThread = 0;
     int scratchKLen = 0;          ///< k-stride within one thread's (i,k) slice
     int xk2DLenPerThread = 0;     ///< one thread's slice length in the XK buffers
@@ -94,5 +97,7 @@ struct AccelScratch {
         wNum  .assign(wTotal, 0.0); wDen .assign(wTotal, 0.0);
         wDPe  .assign(wTotal, 0.0); wQMask.assign(wTotal, 0.0);
         wQDen .assign(wTotal, 1.0); wQAdd .assign(wTotal, 0.0);
+        wNumC .assign(wTotal, 0.0); wDenC.assign(wTotal, 1.0);
+        wDPeC .assign(wTotal, 0.0); wCis .assign(wTotal, 0.0);
     }
 };

@@ -162,6 +162,60 @@ void weightDivideRow(const double* __restrict num, const double* __restrict den,
     }
 }
 
+// One (i,j) k-row of the Y sweep's fused passes 1-3, doing every division
+// here. The caller's scalar pass picked the operands for both weight
+// evaluations -- the face one, which also feeds qsi, and the cell one -- so
+// nothing branches and all six divisions vectorise. Kept as one row rather
+// than a division pass plus a stencil pass: at short rows the extra call and
+// scratch round-trip cost more than the vectorisation returns.
+//
+// ppisIn and cisOut are separate buffers the caller swaps after each j, which
+// is what the single in-place ppiwRow did when this was a scalar loop: read
+// j-1's south coefficient, write j's for j+1.
+__attribute__((noinline)) inline
+void ySweepRow(double* __restrict ax, double* __restrict ay, double* __restrict az,
+               const double* __restrict vxm, const double* __restrict vx0c, const double* __restrict vxp,
+               const double* __restrict vym, const double* __restrict vy0c, const double* __restrict vyp,
+               const double* __restrict vzm, const double* __restrict vz0c, const double* __restrict vzp,
+               const double* __restrict numF, const double* __restrict denF,
+               const double* __restrict dpeF, const double* __restrict qMask,
+               const double* __restrict qDen, const double* __restrict qAdd,
+               const double* __restrict numC, const double* __restrict denC,
+               const double* __restrict dpeC,
+               const double* __restrict ppisIn, double* __restrict cisOut,
+               double* __restrict qsi,
+               double* __restrict ku, double* __restrict kv, double* __restrict kw,
+               int n, double coeff, double localRe)
+{
+    for (int t = 0; t < n; ++t) {
+        const double vxmT = vxm[t], vx0 = vx0c[t], vxpT = vxp[t];
+        const double vymT = vym[t], vy0 = vy0c[t], vypT = vyp[t];
+        const double vzmT = vzm[t], vz0 = vz0c[t], vzpT = vzp[t];
+
+        // Pass 1: face coefficients (between j and j+1)
+        const double pipF = numF[t] / denF[t];
+        const double pimF = dpeF[t] + pipF;
+        const double ppin = pipF / localRe;
+        cisOut[t] = pimF / localRe;
+        const double ppis = ppisIn[t];
+        qsi[t] = ((pipF - 1.0) * qMask[t]) / qDen[t] + qAdd[t];
+
+        // Pass 2: diffusive part of Au, Av, Aw
+        ax[t] += (ppin*(vxpT-vx0) + ppis*(vxmT-vx0)) * coeff;
+        ay[t] += (ppin*(vypT-vy0) + ppis*(vymT-vy0)) * coeff;
+        az[t] += (ppin*(vzpT-vz0) + ppis*(vzmT-vz0)) * coeff;
+
+        // Pass 3: cross-term correction (K * qsi)
+        const double pipC = numC[t] / denC[t];
+        const double pimC = dpeC[t] + pipC;
+        const double cinC = (pipC / localRe) * coeff;
+        const double cisC = (pimC / localRe) * coeff;
+        ku[t] = cinC*(vx0-vxpT) + cisC*(vx0-vxmT);
+        kv[t] = cinC*(vy0-vypT) + cisC*(vy0-vymT);
+        kw[t] = cinC*(vz0-vzpT) + cisC*(vz0-vzmT);
+    }
+}
+
 // One k-row of computeDivergence's 8-corner divergence, into a scratch row.
 // The kernel's reductions must stay scalar and in order to keep the sums
 // bit-identical; only the stencil moves here, where it vectorises.
