@@ -143,48 +143,34 @@ void computeAccelerations(SimState& s)
                 VM2(qsieXK, i+1, k) = computeQsi(DPe, pip, 0.5);
             }
         }
+        // The west coefficient alternates between two rows instead of being
+        // updated in place, so xSweepRow's operands can all be restrict.
+        double* __restrict pW = ppiwRow.data();
+        double* __restrict pE = s.ext.accel.wCis.data();
         for (int i = iStart+1; i <= iEnd-1; ++i) {
             const double localRe = 1.0 / effectiveInvRe(s, i);
+            // Scalar pass: the branch chain and the exp, nothing else. The
+            // divisions all moved into xSweepRow, where they vectorise.
             for (int k = 1; k <= KKfim; ++k) {
-                // One load of each field per (i,k), shared by all three passes.
-                const double vxm = s.velX(i-1,j,k), vx0 = s.velX(i,j,k), vxp = s.velX(i+1,j,k);
-                const double vym = s.velY(i-1,j,k), vy0 = s.velY(i,j,k), vyp = s.velY(i+1,j,k);
-                const double vzm = s.velZ(i-1,j,k), vz0 = s.velZ(i,j,k), vzp = s.velZ(i+1,j,k);
-
-                // Pass 1: face coefficients (between i and i+1)
-                const double uFace = 0.5 * (vxp + vx0);
+                const double uFace = 0.5 * (s.velX(i+1,j,k) + s.velX(i,j,k));
                 const double DPeFace = localRe * uFace * cfg.cellSizeX;
-                double pipF, cipF, cimF;
-                computeExponentialWeights(localRe, DPeFace, pipF, cipF, cimF);
-                // Read the carried value BEFORE overwriting the slot: this row
-                // holds i-1's west coefficient, and pass 1 is about to replace
-                // it with i+1's.
-                const double ppiw = ppiwRow[k-1];
-                ppiwRow[k-1] = cimF;
-                const double ppie = cipF;                // consumed this iteration
-                VM2(qsieXK, i+1, k) = computeQsi(DPeFace, pipF, 0.5);
+                wDPe[k] = DPeFace;
+                weightOperands(DPeFace, 0.5, wNum[k], wDen[k], wQMask[k], wQDen[k], wQAdd[k]);
 
-                // Pass 2: diffusive part of Au, Av, Aw (first part)
-                // Assign, not accumulate: this is the first write to every cell
-                // in the X sweep's range, so the reset above skips them
-                // entirely -- three fields' worth of stores, and the read half
-                // of the read-modify-write, both gone.
-                const double coeff = invDx2;
-                s.accelX(i, j, k) = (ppie*(vxp-vx0) + ppiw*(vxm-vx0)) * coeff;
-                s.accelY(i, j, k) = (ppie*(vyp-vy0) + ppiw*(vym-vy0)) * coeff;
-                s.accelZ(i, j, k) = (ppie*(vzp-vz0) + ppiw*(vzm-vz0)) * coeff;
-
-                // Pass 3: cross-term correction (K * qsi)
-                const double uCell = vx0;
-                const double DPeCell = localRe * uCell * cfg.cellSizeX;
-                double pipC, cipC, cimC;
-                computeExponentialWeights(localRe, DPeCell, pipC, cipC, cimC);
-                cipC *= invDx2;
-                cimC *= invDx2;
-                VM2(KuXK, i+1, k) = cipC*(vx0-vxp) + cimC*(vx0-vxm);
-                VM2(KvXK, i+1, k) = cipC*(vy0-vyp) + cimC*(vy0-vym);
-                VM2(KwXK, i+1, k) = cipC*(vz0-vzp) + cimC*(vz0-vzm);
+                const double DPeCell = localRe * s.velX(i,j,k) * cfg.cellSizeX;
+                wDPeC[k] = DPeCell;
+                expWeightOperands(DPeCell, wNumC[k], wDenC[k]);
             }
+            xSweepRow(&s.accelX(i,j,1), &s.accelY(i,j,1), &s.accelZ(i,j,1),
+                      &s.velX(i-1,j,1), &s.velX(i,j,1), &s.velX(i+1,j,1),
+                      &s.velY(i-1,j,1), &s.velY(i,j,1), &s.velY(i+1,j,1),
+                      &s.velZ(i-1,j,1), &s.velZ(i,j,1), &s.velZ(i+1,j,1),
+                      wNum+1, wDen+1, wDPe+1, wQMask+1, wQDen+1, wQAdd+1,
+                      wNumC+1, wDenC+1, wDPeC+1,
+                      pW, pE, &VM2(qsieXK, i+1, 1),
+                      &VM2(KuXK, i+1, 1), &VM2(KvXK, i+1, 1), &VM2(KwXK, i+1, 1),
+                      KKfim, invDx2, localRe);
+            std::swap(pW, pE);
         }
         // Extrapolate Ku,Kv,Kw at boundaries -- per k, unchanged formula
         for (int k = 1; k <= KKfim; ++k) {

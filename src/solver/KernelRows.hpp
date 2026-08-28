@@ -162,6 +162,53 @@ void weightDivideRow(const double* __restrict num, const double* __restrict den,
     }
 }
 
+// The X sweep's fused passes 1-3, one (i,j) k-row. Identical to ySweepRow
+// below except that pass 2 assigns rather than accumulates -- X runs first,
+// so this is the only write to those cells, and the reset plan skips them.
+__attribute__((noinline)) inline
+void xSweepRow(double* __restrict ax, double* __restrict ay, double* __restrict az,
+               const double* __restrict vxm, const double* __restrict vx0c, const double* __restrict vxp,
+               const double* __restrict vym, const double* __restrict vy0c, const double* __restrict vyp,
+               const double* __restrict vzm, const double* __restrict vz0c, const double* __restrict vzp,
+               const double* __restrict numF, const double* __restrict denF,
+               const double* __restrict dpeF, const double* __restrict qMask,
+               const double* __restrict qDen, const double* __restrict qAdd,
+               const double* __restrict numC, const double* __restrict denC,
+               const double* __restrict dpeC,
+               const double* __restrict ppiwIn, double* __restrict cimOut,
+               double* __restrict qsi,
+               double* __restrict ku, double* __restrict kv, double* __restrict kw,
+               int n, double coeff, double localRe)
+{
+    for (int t = 0; t < n; ++t) {
+        const double vxmT = vxm[t], vx0 = vx0c[t], vxpT = vxp[t];
+        const double vymT = vym[t], vy0 = vy0c[t], vypT = vyp[t];
+        const double vzmT = vzm[t], vz0 = vz0c[t], vzpT = vzp[t];
+
+        // Pass 1: face coefficients (between i and i+1)
+        const double pipF = numF[t] / denF[t];
+        const double pimF = dpeF[t] + pipF;
+        const double ppie = pipF / localRe;
+        cimOut[t] = pimF / localRe;
+        const double ppiw = ppiwIn[t];
+        qsi[t] = ((pipF - 1.0) * qMask[t]) / qDen[t] + qAdd[t];
+
+        // Pass 2: assign, not accumulate
+        ax[t] = (ppie*(vxpT-vx0) + ppiw*(vxmT-vx0)) * coeff;
+        ay[t] = (ppie*(vypT-vy0) + ppiw*(vymT-vy0)) * coeff;
+        az[t] = (ppie*(vzpT-vz0) + ppiw*(vzmT-vz0)) * coeff;
+
+        // Pass 3: cross-term correction (K * qsi)
+        const double pipC = numC[t] / denC[t];
+        const double pimC = dpeC[t] + pipC;
+        const double cipC = (pipC / localRe) * coeff;
+        const double cimC = (pimC / localRe) * coeff;
+        ku[t] = cipC*(vx0-vxpT) + cimC*(vx0-vxmT);
+        kv[t] = cipC*(vy0-vypT) + cimC*(vy0-vymT);
+        kw[t] = cipC*(vz0-vzpT) + cimC*(vz0-vzmT);
+    }
+}
+
 // One (i,j) k-row of the Y sweep's fused passes 1-3, doing every division
 // here. The caller's scalar pass picked the operands for both weight
 // evaluations -- the face one, which also feeds qsi, and the cell one -- so
