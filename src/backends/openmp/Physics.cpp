@@ -479,6 +479,15 @@ void computeAccelerations(SimState& s)
 
     // ---------- Direction Z ----------
     const double invDz2 = 1.0 / (cfg.cellSizeZ * cfg.cellSizeZ);
+
+    // Peel bounds for this sweep's periodic wrap, hoisted out of the i/j
+    // loops. KKfim is numCellsZ when periodic and numCellsZm1 otherwise, so
+    // the non-periodic case has no wrapping iteration to peel at all and
+    // every loop below runs its full original range.
+    const int zP1Hi  = periodic ? KKfim - 1 : KKfim;   // pass 1:      kp = k+1
+    const int zP23Lo = periodic ? 2 : 1;               // passes 2-3:  km = k-1
+    const int zP23Hi = periodic ? KKfim - 1 : KKfim;   //              kp = k+1
+    const int zXtLo  = periodic ? 2 : 1;               // cross term:  km = k-1
     // Parallel over i -- same reasoning as the X/Y sweeps' #pragma omp for
     // above. Implicit barrier at the end of this omp-for (no `nowait`) is
     // required: this is the last sweep before the parallel region closes,
@@ -489,8 +498,12 @@ void computeAccelerations(SimState& s)
         const double invRe = effectiveInvRe(s, i);
         const double localRe = 1.0 / invRe;
         for (int j = s.jLow[i]+1; j <= s.jHigh[i]-1; ++j) {
-            for (int k = 0; k <= KKfim; ++k) {
-                int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
+            // Pass 1. The periodic wrap -- kp folds back to 1 at k ==
+            // numCellsZ -- is this loop's only non-affine index, and it cost
+            // the whole loop: `periodic` is a runtime bool, so the select
+            // survived into every iteration and the vectoriser reported
+            // "control flow in loop". Peeled, the range below is plain k+1.
+            auto zPassOne = [&](int k, int kp) __attribute__((always_inline)) {
                 const double wFace = 0.5 * (s.velZ(i, j, kp) + s.velZ(i, j, k));
                 const double DPe = localRe * wFace * cfg.cellSizeZ;
                 double pip, ciu, cid;
@@ -498,7 +511,10 @@ void computeAccelerations(SimState& s)
                 VM(ppiu, k+1) = ciu;
                 VM(ppid, kp+1) = cid;
                 VM(qsiu, k+1) = computeQsi(DPe, pip, 0.5);
-            }
+            };
+            for (int k = 0; k <= zP1Hi; ++k) zPassOne(k, k+1);
+            if (periodic) zPassOne(cfg.numCellsZ, 1);
+
             // Passes 2 and 3 fused: both read velX/velY/velZ at km, k and kp,
             // the same nine loads twice over. Pass 3 consumes no pass output,
             // and pass 2 only needs pass 1's completed arrays.
@@ -507,10 +523,13 @@ void computeAccelerations(SimState& s)
             // wraps -- at k == numCellsZ the periodic kp folds back to 1 and
             // writes ppid(2), which pass 2 reads at k == 1 -- so pass 1 has a
             // backward dependency and must finish first.
-            for (int k = 1; k <= KKfim; ++k) {
-                const int kp = (periodic && k == cfg.numCellsZ) ? 1 : k+1;
-                const int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
-
+            //
+            // Both wrapping ends are peeled here, for the same reason as pass
+            // 1 and at both ends because this body carries two folded indices
+            // (km at k == 1, kp at k == numCellsZ). No iteration depends on
+            // another -- every write is to its own k -- so the peels may run
+            // either side of the interior without changing a single result.
+            auto zPassTwoThree = [&](int k, int kp, int km) __attribute__((always_inline)) {
                 const double vxm = s.velX(i,j,km), vx0 = s.velX(i,j,k), vxp = s.velX(i,j,kp);
                 const double vym = s.velY(i,j,km), vy0 = s.velY(i,j,k), vyp = s.velY(i,j,kp);
                 const double vzm = s.velZ(i,j,km), vz0 = s.velZ(i,j,k), vzp = s.velZ(i,j,kp);
@@ -531,7 +550,12 @@ void computeAccelerations(SimState& s)
                 VM(Ku, k+1) = ciu*(vx0-vxp) + cid*(vx0-vxm);
                 VM(Kv, k+1) = ciu*(vy0-vyp) + cid*(vy0-vym);
                 VM(Kw, k+1) = ciu*(vz0-vzp) + cid*(vz0-vzm);
-            }
+            };
+            if (periodic) zPassTwoThree(1, cfg.numCellsZ == 1 ? 1 : 2, cfg.numCellsZ);
+            for (int k = zP23Lo; k <= zP23Hi; ++k) zPassTwoThree(k, k+1, k-1);
+            if (periodic && cfg.numCellsZ > 1)
+                zPassTwoThree(cfg.numCellsZ, 1, cfg.numCellsZ-1);
+
             if (!periodic) { // Dirichlet in z: extrapolate
                 VM(Ku, 0+1) = 2.0*VM(Ku,1+1) - VM(Ku,2+1);
                 VM(Kv, 0+1) = 2.0*VM(Kv,1+1) - VM(Kv,2+1);
@@ -546,12 +570,22 @@ void computeAccelerations(SimState& s)
                 VM(Kv, k+1) = 0.5*(VM(Kv, k+1) + VM(Kv, kp+1));
                 VM(Kw, k+1) = 0.5*(VM(Kw, k+1) + VM(Kw, kp+1));
             }
-            for (int k = 1; k <= KKfim; ++k) {
-                int km = (periodic && k == 1) ? cfg.numCellsZ : k-1;
-                s.accelX(i, j, k) -= (VM(Ku,k+1)*VM(qsiu,k+1) - VM(Ku,km+1)*VM(qsiu,km+1));
-                s.accelY(i, j, k) -= (VM(Kv,k+1)*VM(qsiu,k+1) - VM(Kv,km+1)*VM(qsiu,km+1));
-                s.accelZ(i, j, k) -= (VM(Kw,k+1)*VM(qsiu,k+1) - VM(Kw,km+1)*VM(qsiu,km+1));
+            // Cross-term divergence, the X and Y sweeps' row kernel at last.
+            // Only k == 1 folds km back to numCellsZ, so peeling that one
+            // iteration leaves a row whose Hi and Lo operands are the same
+            // scratch offset by one. They overlap, but both are read-only
+            // here -- crossTermRow writes only the three accel rows, which
+            // are a different allocation -- so the restrict qualifiers hold.
+            if (periodic) {
+                s.accelX(i, j, 1) -= (VM(Ku,2)*VM(qsiu,2) - VM(Ku,cfg.numCellsZ+1)*VM(qsiu,cfg.numCellsZ+1));
+                s.accelY(i, j, 1) -= (VM(Kv,2)*VM(qsiu,2) - VM(Kv,cfg.numCellsZ+1)*VM(qsiu,cfg.numCellsZ+1));
+                s.accelZ(i, j, 1) -= (VM(Kw,2)*VM(qsiu,2) - VM(Kw,cfg.numCellsZ+1)*VM(qsiu,cfg.numCellsZ+1));
             }
+            if (KKfim >= zXtLo)
+                crossTermRow(&s.accelX(i,j,zXtLo), &s.accelY(i,j,zXtLo), &s.accelZ(i,j,zXtLo),
+                             &VM(Ku,zXtLo+1), &VM(Kv,zXtLo+1), &VM(Kw,zXtLo+1), &VM(qsiu,zXtLo+1),
+                             &VM(Ku,zXtLo),   &VM(Kv,zXtLo),   &VM(Kw,zXtLo),   &VM(qsiu,zXtLo),
+                             KKfim - zXtLo + 1);
         }
     }
     } // end #pragma omp parallel
