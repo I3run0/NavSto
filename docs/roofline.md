@@ -170,3 +170,102 @@ python3 scripts/roofline.py
 #        experiments/results/roofline/gprof_raw.txt,
 #        experiments/figures/roofline.png
 ```
+
+---
+
+## Correction, 2026-08-28: it is neither the exp() nor the memory
+
+Everything above reads `computeAccelerations` as sitting at ~45% of an
+exp() throughput ceiling with an arithmetic intensity of 0.099 FLOP/byte,
+and concludes "likely a memory/cache-access-pattern problem". Both halves
+of that are wrong, and the conclusion sent one iteration down a dead end
+before the cost was measured directly instead of modelled.
+
+Method: build a diagnostic variant from the same commit with one construct
+replaced by a same-shape stand-in (results deliberately wrong, never
+committed), then time `kbench --kernel computeAccelerations` against the
+real binary, interleaved, at both Reynolds numbers the project uses --
+kbench defaults to Re=10000, while the roofline and reward workloads use
+Re=100, and the branch taken inside `computeExponentialWeights` differs
+between them.
+
+| construct removed | Re=10000 | Re=100 |
+|---|---|---|
+| `exp()` -> polynomial stand-in | 1.6-3.0% | 6.7-7.1% |
+| all divisions -> multiplications | 29.4-30.7% | 28.9-29.2% |
+| ...of which the two `/localRe` | 15.3% | 14.6% |
+| ...of which `pip`'s own (poly + exp branch) | 20.4% | 18.9% |
+| ...of which `computeQsi`'s | 10.5% | 10.6% |
+
+(The three sub-rows do not sum to the combined row; removing one division
+lets the others' latency overlap, so measured individually each looks
+larger than its marginal share.)
+
+**exp() is not the bottleneck.** It is at most 7% of the kernel, not the
+~55% the "45% of the exp ceiling" line implies. At Re=10000, `DPe` is
+around 625, the `|DPe| > 200` branch returns without calling `exp` at all,
+and the kernel still costs the same. `exp_ceiling_gflops_1t` divides the
+kernel's whole FLOP count by its exp count and multiplies by a
+back-to-back-exp microbenchmark rate; that models a kernel whose exps
+cannot overlap with anything else, which this one's plainly can. Read the
+metric as a lower bound on achievable, never as an attribution.
+
+**It is not bandwidth-bound either.** ns per active cell across a 145x
+growth in working set, well past the 12 MB L3:
+
+| grid | working set (6 fields) | accel ns/cell | pressure ns/cell |
+|---|---|---|---|
+| 32x16x8 | 0.3 MB | 31.70 | 16.79 |
+| 96x48x24 | 5.8 MB | 33.95 | 15.08 |
+| 128x64x32 | 13.4 MB | 35.17 | 14.90 |
+| 192x96x48 | 43.5 MB | 37.20 | 15.94 |
+
+17% from L2-resident to four times L3. A bandwidth-bound kernel falls off
+a cliff there; this one does not, and `solvePressurePoisson` is flat.
+
+**It is division throughput.** ~21 double divisions per cell per call (7
+per sweep: 3 in pass 1's `computeExponentialWeights`, 1 in its
+`computeQsi`, 3 in pass 3's), every one of them scalar because
+`computeExponentialWeights`' four-way branch chain leaves the enclosing
+loop unvectorised. At ~4-6 cycles of `divsd` throughput that alone is the
+order of the whole measured runtime.
+
+The three sweeps are near-equal in cost, so `roofline.py`'s "X/Y/Z treated
+as structurally equal" is sound (per-sweep timers, 96x48x24, 40 calls):
+
+| | X | Y | Z |
+|---|---|---|---|
+| Re=10000 | 31.6% | 32.3% | 36.1% |
+| Re=100 | 35.6% | 31.3% | 33.2% |
+
+### What follows from this
+
+Vectorising the divisions is the available win, and it can be done
+bit-identically. Every branch of `computeExponentialWeights` and
+`computeQsi` can be written as a single division of a `(num, den)` pair
+chosen by the branch, because `x/1.0` and `0.0/1.0` are exact:
+
+| branch | num | den |
+|---|---|---|
+| `\|DPe\| < 0.1` | `1` | the polynomial |
+| `\|DPe\| <= 200` | `DPe` | `exp(DPe) - 1` |
+| `DPe > 200` | `0` | `1` |
+| otherwise | `-DPe` | `1` |
+
+That turns the branchy scalar evaluation into a scalar pass that only
+selects operands and a division pass with no control flow in it, which is
+the shape `KernelRows.hpp` already vectorises. The same restructuring
+covers `pip / localRe` and `pim / localRe`, which are unconditional today
+and account for ~15% on their own.
+
+Two things measured along the way that are *not* the win:
+
+- **Vectorising the Z sweep's stencil arithmetic is worth ~0.6%.** Passes
+  2 and 3 were split so the ~40 FLOPs of differences and products moved
+  into a `zDiffusionCrossRow` row kernel that does vectorise to 32-byte
+  vectors. Paired, 9/9 pairs, 1.006x -- inside this kernel's 0.992-1.013x
+  code-layout band, so not resolvable. Reverted. The arithmetic around the
+  divisions is not what the kernel is waiting on.
+- **The pressure solve is flat in ns/cell at every size**, so the red-black
+  argument above should not expect a bandwidth win either; its case rests
+  on the dependency chain and on parallelisation, as originally scoped.
