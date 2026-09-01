@@ -12,6 +12,7 @@ reference/navsto
 scripts/roofline/peak_flops
 scripts/roofline/peak_flops_omp
 scripts/roofline/peak_bandwidth
+scripts/roofline/peak_bandwidth_cuda
 scripts/roofline/peak_bandwidth_omp
 scripts/roofline/peak_exp_throughput
 scripts/roofline/peak_exp_throughput_omp
