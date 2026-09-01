@@ -498,6 +498,7 @@ void buildPressureSource(SimState& s)
 // ---------------------------------------------------------------------------
 static void gaussSeidelSweeps(SimState& s, int nSweeps)
 {
+    constexpr int GSB = 6;
     const auto& cfg = s.cfg;
     const double cX = 1.0 / s.cellSizeXsq;
     const double cY = 1.0 / s.cellSizeYsq;
@@ -571,18 +572,18 @@ static void gaussSeidelSweeps(SimState& s, int nSweeps)
             // nothing a cell reads, since k=1 reads k=2 as not-yet-updated
             // either way, and k=nZ reads k=1 as updated either way.
             auto blockRows4 = [&](int j0) {
-                for (int b = 0; b < 4; ++b) {
+                for (int b = 0; b < GSB; ++b) {
                     const int j = j0 + b;
                     if (solidWall) s.press(i, j, 0) = s.press(i, j, 1);
                     cellAt(j, 1, solidWall ? 0 : nZ, 2);
                 }
 
                 // Diagonal d places row j0+b at k = d-b, for k in 2..nZ-1.
-                const int dEnd = (nZ - 1) + 3;
-                const int sLo = 5, sHi = nZ - 1;   // all four rows in range
+                const int dEnd = (nZ - 1) + (GSB-1);
+                const int sLo = GSB+1, sHi = nZ - 1;   // all rows in range
                 auto ragged = [&](int d) {
                     const int bLo = std::max(0, d - (nZ-1));
-                    const int bHi = std::min(3, d - 2);
+                    const int bHi = std::min(GSB-1, d - 2);
                     for (int b = bLo; b <= bHi; ++b) {
                         const int k = d - b;
                         cellAt(j0 + b, k, k-1, k+1);
@@ -591,24 +592,22 @@ static void gaussSeidelSweeps(SimState& s, int nSweeps)
                 if (sLo <= sHi) {
                     for (int d = 2;       d <  sLo;  ++d) ragged(d);
                     for (int d = sLo;     d <= sHi;  ++d) {   // steady, unrolled
-                        cellAt(j0,   d,   d-1, d+1);
-                        cellAt(j0+1, d-1, d-2, d);
-                        cellAt(j0+2, d-2, d-3, d-1);
-                        cellAt(j0+3, d-3, d-4, d-2);
+                        #pragma GCC unroll 16
+                        for (int b = 0; b < GSB; ++b) cellAt(j0+b, d-b, d-b-1, d-b+1);
                     }
                     for (int d = sHi + 1; d <= dEnd; ++d) ragged(d);
                 } else {
                     for (int d = 2; d <= dEnd; ++d) ragged(d);
                 }
 
-                for (int b = 0; b < 4; ++b) {
+                for (int b = 0; b < GSB; ++b) {
                     const int j = j0 + b;
                     if (solidWall) s.press(i, j, nZ+1) = s.press(i, j, nZ);
                     cellAt(j, nZ, nZ-1, solidWall ? nZ+1 : 1);
                 }
             };
 
-            constexpr int GS_BLOCK = 4;
+            constexpr int GS_BLOCK = GSB;
             for (int j = jLoopS; j <= jLoopN; ) {
                 if (isCommon(j)) {
                     int jr = j;
