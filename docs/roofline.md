@@ -269,3 +269,62 @@ Two things measured along the way that are *not* the win:
 - **The pressure solve is flat in ns/cell at every size**, so the red-black
   argument above should not expect a bandwidth win either; its case rests
   on the dependency chain and on parallelisation, as originally scoped.
+
+---
+
+## Where the two big kernels stand, 2026-09-01
+
+After the division work (641b4e1, 48a49b5, 6bac91a) and the Gauss-Seidel
+diagonal blocking (b52fd70, 140a9a9), re-measured the same way -- diagnostic
+builds with one construct replaced by a same-shape stand-in, timed
+interleaved against the real binary.
+
+**`computeAccelerations`**, now ~59% of the step:
+
+| component | share of the kernel |
+|---|---|
+| divisions (now vectorised) | 29-33% |
+| scalar operand pass (branch chain + `exp`) | 21-26% |
+| everything else (vectorised stencil, loads, stores) | ~45% |
+
+The divisions did not shrink as a *share* -- they were 29% before being
+vectorised and are 29-33% after -- because the stencil arithmetic sitting
+next to them vectorised at the same time and by about the same factor. In
+absolute terms both got roughly 1.25x faster together. What this says is
+that the kernel is now at the `vdivpd` throughput floor: the division count
+per cell is fixed by the scheme, and cutting it means changing the
+arithmetic, which the gate forbids. There is no further win here without
+relaxing that.
+
+The scalar operand pass is the branch chain and the transcendental, both
+of which the physics requires. Note it is ~22% while `exp` alone is <=7%:
+most of that cost is the branching and the stores, not the transcendental.
+A row-level dispatch could vectorise it when every cell in a row takes the
+same branch -- at Re=10000 all of them take `DPe > 200`, which needs no
+`exp` at all -- but that buys nothing at Re=100, which is what the reward
+and roofline workloads actually run.
+
+**`solvePressurePoisson`**, now ~19% of the step, down from ~26%:
+
+| | recurrence share |
+|---|---|
+| before diagonal blocking | 69-75% |
+| after, six rows per block | 24-31% |
+
+Most of the dependent-latency stall is gone. What remains is the ragged
+prologue and epilogue of each skewed block, the k=1 and k=nZ phases (which
+are themselves six-cell dependent chains along j, and cannot be broken in
+lexicographic order), and the boundary rows that keep the general path.
+Recovering it would need a different structure -- interleaving one block's
+k=nZ phase with the next block's k=1 phase is legal and would give two
+chains there -- for perhaps 4-5% of the whole program.
+
+### Measurement note: OpenMP at six threads still cannot be read here
+
+The accel work measures 1.143x whole-program at one thread, 7/7 pairs. The
+same binaries at six threads gave 0.948x with 0/7 pairs in one window and
+0.974x with 5/11 in another, with individual pairs ranging 0.860-1.105 --
+and bisecting the interval put *both* halves above 1.0x, which cannot be
+true if the whole is below it. Treat any six-thread whole-program number
+from this machine as unresolvable rather than as a verdict, exactly as the
+kernel tier already is.
