@@ -526,7 +526,99 @@ static void gaussSeidelSweeps(SimState& s, int nSweeps)
             const bool iIsLeftEdge  = (i == 1);
             const bool iIsRightEdge = (i == cfg.numCellsX);
 
-            for (int j = jLoopS; j <= jLoopN; ++j) {
+            // A row mirrors nothing, holds no reference node and is not a
+            // corner: every test in the general loop is then loop-invariant
+            // and false, so such rows take the block path below.
+            auto isCommon = [&](int j) {
+                const bool mirrorW = iIsLeftEdge  || (i == s.iLow[j]+1);
+                const bool mirrorE = iIsRightEdge || (i == s.iHigh[j]);
+                const bool corner  = (iIsLeftEdge || iIsRightEdge)
+                                  && (j == s.jLow[i]+1 || j == s.jHigh[i]);
+                return !mirrorW && !mirrorE && j != jLoopS && j != jLoopN
+                       && !corner && !(i == iRef && j == jRef) && nZ >= 2;
+            };
+
+            auto cellAt = [&](int j, int k, int km, int kp) {
+                const double pNew = (cY*(s.press(i,j+1,k) + s.press(i,j-1,k))
+                                  + cX*(s.press(ip,j,k) + s.press(im,j,k))
+                                  + cZ*(s.press(i,j,kp) + s.press(i,j,km))
+                                  - s.pressureSource(i,j,k)) * invDiag;
+                s.press(i, j, k) += omega * (pNew - s.press(i, j, k));
+            };
+
+            // One common row, in its original order: the k=1 and k=nZ peels
+            // are the only two that wrap or write a z ghost.
+            auto plainRow = [&](int j) {
+                if (solidWall) s.press(i, j, 0) = s.press(i, j, 1);
+                cellAt(j, 1, solidWall ? 0 : nZ, 2);
+                for (int k = 2; k <= nZ-1; ++k) cellAt(j, k, k-1, k+1);
+                if (solidWall) s.press(i, j, nZ+1) = s.press(i, j, nZ);
+                cellAt(j, nZ, nZ-1, solidWall ? nZ+1 : 1);
+            };
+
+            // Four consecutive common rows, walked along j+k diagonals rather
+            // than row by row. Every cell still reads exactly what it read in
+            // lexicographic order -- (j-1,k) and (j,k-1) updated, (j+1,k) and
+            // (j,k+1) not -- because row j runs one k ahead of row j+1, so the
+            // result is bit-identical. What changes is that the four cells on a
+            // diagonal are mutually independent: the k recurrence is 69-75% of
+            // this kernel (docs/roofline.md), and one chain at a time leaves the
+            // machine waiting on ~30 cycles of dependent latency per cell.
+            //
+            // The two peels are lifted out into their own j-ordered phases so
+            // the diagonal body has no k test in it at all. That is order-safe
+            // for the same reason: doing every row's k=1 before any k=2 changes
+            // nothing a cell reads, since k=1 reads k=2 as not-yet-updated
+            // either way, and k=nZ reads k=1 as updated either way.
+            auto blockRows4 = [&](int j0) {
+                for (int b = 0; b < 4; ++b) {
+                    const int j = j0 + b;
+                    if (solidWall) s.press(i, j, 0) = s.press(i, j, 1);
+                    cellAt(j, 1, solidWall ? 0 : nZ, 2);
+                }
+
+                // Diagonal d places row j0+b at k = d-b, for k in 2..nZ-1.
+                const int dEnd = (nZ - 1) + 3;
+                const int sLo = 5, sHi = nZ - 1;   // all four rows in range
+                auto ragged = [&](int d) {
+                    const int bLo = std::max(0, d - (nZ-1));
+                    const int bHi = std::min(3, d - 2);
+                    for (int b = bLo; b <= bHi; ++b) {
+                        const int k = d - b;
+                        cellAt(j0 + b, k, k-1, k+1);
+                    }
+                };
+                if (sLo <= sHi) {
+                    for (int d = 2;       d <  sLo;  ++d) ragged(d);
+                    for (int d = sLo;     d <= sHi;  ++d) {   // steady, unrolled
+                        cellAt(j0,   d,   d-1, d+1);
+                        cellAt(j0+1, d-1, d-2, d);
+                        cellAt(j0+2, d-2, d-3, d-1);
+                        cellAt(j0+3, d-3, d-4, d-2);
+                    }
+                    for (int d = sHi + 1; d <= dEnd; ++d) ragged(d);
+                } else {
+                    for (int d = 2; d <= dEnd; ++d) ragged(d);
+                }
+
+                for (int b = 0; b < 4; ++b) {
+                    const int j = j0 + b;
+                    if (solidWall) s.press(i, j, nZ+1) = s.press(i, j, nZ);
+                    cellAt(j, nZ, nZ-1, solidWall ? nZ+1 : 1);
+                }
+            };
+
+            constexpr int GS_BLOCK = 4;
+            for (int j = jLoopS; j <= jLoopN; ) {
+                if (isCommon(j)) {
+                    int jr = j;
+                    while (jr + 1 <= jLoopN && isCommon(jr + 1)) ++jr;
+                    int jj = j;
+                    for (; jj + GS_BLOCK - 1 <= jr; jj += GS_BLOCK) blockRows4(jj);
+                    for (; jj <= jr; ++jj) plainRow(jj);
+                    j = jr + 1;
+                    continue;
+                }
                 const int jm = j-1, jp = j+1;
 
                 // Neumann ghost-cell mirroring — which faces mirror is fixed
@@ -538,27 +630,6 @@ static void gaussSeidelSweeps(SimState& s, int nSweeps)
                 const bool corner  = (iIsLeftEdge || iIsRightEdge)
                                   && (j == s.jLow[i]+1 || j == s.jHigh[i]);
                 const bool rowHasRef = (i == iRef && j == jRef);
-
-                // The common row mirrors nothing, holds no reference node and
-                // is not a corner, so every test in the general loop below is
-                // loop-invariant and false there. Run it without them, peeling
-                // the only two k that wrap or write a z ghost.
-                if (!mirrorW && !mirrorE && !mirrorS && !mirrorN
-                    && !corner && !rowHasRef && nZ >= 2) {
-                    auto plainCell = [&](int k, int km, int kp) {
-                        const double pNew = (cY*(s.press(i,jp,k) + s.press(i,jm,k))
-                                          + cX*(s.press(ip,j,k) + s.press(im,j,k))
-                                          + cZ*(s.press(i,j,kp) + s.press(i,j,km))
-                                          - s.pressureSource(i,j,k)) * invDiag;
-                        s.press(i, j, k) += omega * (pNew - s.press(i, j, k));
-                    };
-                    if (solidWall) s.press(i, j, 0) = s.press(i, j, 1);
-                    plainCell(1, solidWall ? 0 : nZ, 2);
-                    for (int k = 2; k <= nZ-1; ++k) plainCell(k, k-1, k+1);
-                    if (solidWall) s.press(i, j, nZ+1) = s.press(i, j, nZ);
-                    plainCell(nZ, nZ-1, solidWall ? nZ+1 : 1);
-                    continue;
-                }
 
                 for (int k = 1; k <= nZ; ++k) {
                     int km = k-1, kp = k+1;
@@ -595,6 +666,7 @@ static void gaussSeidelSweeps(SimState& s, int nSweeps)
                         s.press(i, j, k) += omega * (pNew - s.press(i, j, k));
                     }
                 }
+                ++j;
             }
         }
     }
