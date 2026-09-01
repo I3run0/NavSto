@@ -154,11 +154,11 @@ code change is reverted but the finding is worth keeping.
 bit-identical). Under the accuracy rule above that default is a live exception:
 it agrees with the fp64 device build to six significant figures, not exactly,
 and `validate_cuda.py` widens its RK4 tolerance from 1e-12 to 1e-5 to admit it.
-Rebuild with `-DNAVSOLVER_CUDA_REAL=double` to restore fp64; the startup
-  banner reports `CUDA (fp32)` or `CUDA (fp64)`, and is the thing to check
-  — that flag was accepted but unwired until `83b12f5`, so it silently
-  produced a float build. Do not extend the
-fp32 pattern to any other backend, and do not widen another tolerance to match.
+Rebuild with `-DNAVSOLVER_CUDA_REAL=double` to restore fp64, and check the
+startup banner — it reports `CUDA (fp32)` or `CUDA (fp64)`. That flag was
+accepted but unwired until `ba98e9d`, so it silently produced a float build.
+Do not extend the fp32 pattern to any other backend, and do not widen another
+tolerance to match.
 
 ## Do not
 
