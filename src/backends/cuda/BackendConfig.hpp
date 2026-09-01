@@ -26,7 +26,8 @@
 /// double and the host SimState is untouched. Narrowing happens at the upload
 /// and download boundary, which runs once per snapshot.
 ///
-/// Build with -DNAVSOLVER_CUDA_REAL=double to restore the old behaviour.
+/// Build with -DNAVSOLVER_CUDA_REAL=double to restore the old behaviour;
+/// CMakeLists turns that cache variable into the definition below.
 #ifndef NAVSOLVER_CUDA_REAL
 #define NAVSOLVER_CUDA_REAL float
 #endif

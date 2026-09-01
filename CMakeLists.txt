@@ -140,6 +140,20 @@ if(CMAKE_CUDA_COMPILER)
     set(NAVSOLVER_CUDA_ARCH 86 CACHE STRING
         "CUDA compute capability to build navsolver_cuda for (e.g. 86, 75)")
 
+    # Device floating-point type. cuda/BackendConfig.hpp defaults to float and
+    # guards on #ifndef, so this has to reach the compiler as a definition --
+    # a bare -DNAVSOLVER_CUDA_REAL=double on the cmake line is only an unused
+    # cache entry, and silently leaves you with the float build.
+    set(NAVSOLVER_CUDA_REAL float CACHE STRING
+        "Device floating-point type for navsolver_cuda (float or double)")
+    set_property(CACHE NAVSOLVER_CUDA_REAL PROPERTY STRINGS float double)
+    if(NOT NAVSOLVER_CUDA_REAL MATCHES "^(float|double)$")
+        message(FATAL_ERROR "NAVSOLVER_CUDA_REAL must be float or double, "
+                            "got '${NAVSOLVER_CUDA_REAL}'")
+    endif()
+    target_compile_definitions(navsolver_cuda PRIVATE
+        NAVSOLVER_CUDA_REAL=${NAVSOLVER_CUDA_REAL})
+
     set_target_properties(navsolver_cuda PROPERTIES
         CUDA_ARCHITECTURES ${NAVSOLVER_CUDA_ARCH}
         CUDA_STANDARD 20
@@ -154,7 +168,8 @@ if(CMAKE_CUDA_COMPILER)
     )
 
     message(STATUS "CUDA compiler found (${CMAKE_CUDA_COMPILER}) — building "
-                   "navsolver_cuda for sm_${NAVSOLVER_CUDA_ARCH}")
+                   "navsolver_cuda for sm_${NAVSOLVER_CUDA_ARCH}, "
+                   "device real = ${NAVSOLVER_CUDA_REAL}")
 else()
     message(STATUS "No CUDA compiler found — skipping navsolver_cuda target")
 endif()
