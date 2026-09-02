@@ -1,0 +1,15 @@
+[
+  {
+    "date": "2026-09-02 04:04",
+    "commit": "48839bc",
+    "track": "perf",
+    "seconds": 35.890004,
+    "message": "hoist the loop-invariant /localRe into a Markstein-refined reciprocal",
+    "quality": {
+      "IntAbsDiv": 0.7699063640881576,
+      "DilMax": 76.50257752059856
+    },
+    "ratio_vs_prev": 1.0287285075780381,
+    "machine": "Intel(R) Core(TM) 7 150U"
+  }
+]

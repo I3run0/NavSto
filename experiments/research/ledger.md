@@ -52,3 +52,12 @@ Also note the whole-program target and the kernel bench disagreed in SIGN here
 (1.014x vs 0.909x). The target dilutes a single-kernel change to ~61% and its
 synthetic-vs-evolved field changes which branch rows take. A single-kernel
 hypothesis must be adjudicated at the kernel, not only on the record target.
+
+## 2026-09-02 04:04Z — RECORD (perf)
+- **Attempt:** hoist the loop-invariant /localRe into a Markstein-refined reciprocal
+- **Against:** `HEAD`   **Backend:** serial
+- **Bit-identical:** True
+- **Code changed in:** computeAccelerations
+- **Timing:** 1.029x, 9/9 pairs; 37.58 s -> 35.89 s
+- **Quality:** IntAbsDiv 0.7699 -> 0.7699, DilMax 76.50 -> 76.50
+- **Verdict:** 1.029x, 9/9 pairs, p=0.002, answer unchanged
