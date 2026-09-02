@@ -171,11 +171,25 @@ def run_target(binary, workdir, threads=None):
                   "DilMax":    statistics.mean(r[4] for r in tail)}
 
 
-def paired_target(base_bin, cand_bin, tmp, repeats, threads=None):
-    """Interleaved, alternating which goes first. Median of paired ratios and a
-    win count -- read both: 7/7 at 1.02x is a result, 4/7 at 1.05x is not."""
+def sign_p(wins, n):
+    """One-sided sign test: P(at least `wins` of `n` fair coin flips)."""
+    return sum(math.comb(n, i) for i in range(wins, n + 1)) / 2.0**n
+
+
+def paired_target(base_bin, cand_bin, tmp, repeats, threads=None, cap=None):
+    """Interleaved, alternating which goes first, sampling until the sign test
+    RESOLVES rather than for a fixed count.
+
+    A fixed count is the wrong instrument when the effect is near the noise
+    floor: a real 5% win measured over 11 pairs can land at 8/11, p=0.113, and
+    get thrown away for want of four more pairs -- while a dead hypothesis
+    burns the same 11 either way. So stop as soon as the evidence is decisive
+    in EITHER direction, and only spend the long tail on genuinely marginal
+    cases. Cheap where it can be, patient where it must be."""
+    cap = cap or max(repeats, 25)
     ratios, base_t, cand_t, qual = [], [], [], {}
-    for i in range(repeats):
+    i = 0
+    while i < cap:
         order = [("base", base_bin), ("cand", cand_bin)]
         if i % 2:
             order.reverse()
@@ -185,9 +199,57 @@ def paired_target(base_bin, cand_bin, tmp, repeats, threads=None):
         base_t.append(got["base"][0]); cand_t.append(got["cand"][0])
         ratios.append(got["base"][0] / got["cand"][0])
         qual = {"base": got["base"][1], "cand": got["cand"][1]}
+        i += 1
+        if i >= repeats:
+            w, n = sum(1 for r in ratios if r > 1.0), len(ratios)
+            # Decisive either way: a significant win, or a significant loss.
+            if sign_p(w, n) <= 0.05 or sign_p(n - w, n) <= 0.05:
+                break
+            # Or hopeless: even winning every remaining pair cannot reach 0.05.
+            if sign_p(w + (cap - n), cap) > 0.05:
+                break
     return {"ratios": ratios, "median": statistics.median(ratios),
             "wins": sum(1 for r in ratios if r > 1.0), "n": len(ratios),
             "base_best": min(base_t), "cand_best": min(cand_t), "quality": qual}
+
+
+def paired_kernel(base_kbench, cand_kbench, grid, repeats, cap, re_=None):
+    """The same adaptive paired test, but on one kbench grid instead of the
+    whole program.
+
+    Needed because the record target dilutes a single-kernel change by that
+    kernel's share of the step: a 5% win in the pressure solve is 1% end to
+    end, which no number of pairs will resolve. A hypothesis aimed at one
+    kernel has to be adjudicated at that kernel -- the two disagreed in SIGN
+    once already (see the branch-dispatch entry in the ledger)."""
+    def one(binary):
+        cmd = [str(binary), "--grid", grid, "--iters", "20"]
+        if re_:
+            cmd += ["--re", str(re_)]
+        r = sh(cmd, env={**os.environ, **BENCH_ENV})
+        return {m.group(1): float(m.group(2)) for m in
+                re.finditer(r'"kernel": "(\w+)".*?"min_ms": ([0-9.]+)', r.stdout)}
+    per = {}
+    i = 0
+    while i < cap:
+        a, b = (one(base_kbench), one(cand_kbench)) if i % 2 == 0 else \
+               tuple(reversed((one(cand_kbench), one(base_kbench))))
+        for k in a:
+            per.setdefault(k, []).append(a[k] / b[k])
+        i += 1
+        if i >= repeats:
+            done = False
+            for k, rs in per.items():
+                w, n = sum(1 for x in rs if x > 1.0), len(rs)
+                if sign_p(w, n) <= 0.05 or sign_p(n - w, n) <= 0.05:
+                    done = True
+            if done or all(sign_p(sum(1 for x in rs if x > 1.0) + (cap - len(rs)), cap) > 0.05
+                           for rs in per.values()):
+                break
+    return {k: {"median": statistics.median(v), "wins": sum(1 for x in v if x > 1.0),
+                "n": len(v), "min": min(v), "max": max(v),
+                "p": sign_p(sum(1 for x in v if x > 1.0), len(v))}
+            for k, v in per.items()}
 
 
 def symbol_map(binary):
@@ -579,6 +641,7 @@ def cmd_attempt(a):
         base_bld = build_ref(ref, tmp, [solver])
         base_bin, cand_bin = base_bld / solver, REPO_ROOT / "build" / solver
         try:
+            kernel_verdicts = []
             print(f"[accuracy] {len(CASES)} configurations, byte-comparing every output")
             acc = accuracy(base_bin, cand_bin, tmp, a.threads,
                            skip_csv=omp and (a.threads or 0) != 1)
@@ -597,8 +660,25 @@ def cmd_attempt(a):
             print(f"    controls        : {', '.join(controls) or '(none)'}   "
                   f"(identical code; their movement is placement and never counts)")
 
-            print(f"[timing]   {a.repeats} interleaved pairs on the target workload")
-            p = paired_target(base_bin, cand_bin, tmp, a.repeats, a.threads)
+            if a.kernel_grids:
+                print(f"[kernel]   adaptive paired kbench, {a.repeats}-{a.max_pairs} pairs")
+                kb = "navsolver_kbench_omp" if omp else "navsolver_kbench"
+                sh(["cmake", "--build", str(REPO_ROOT / "build"), "-j", "--target", kb],
+                   cwd=REPO_ROOT)
+                base_kb = build_ref(ref, tmp / "kb", [kb]) / kb
+                for g in a.kernel_grids:
+                    res = paired_kernel(base_kb, REPO_ROOT / "build" / kb, g,
+                                        a.repeats, a.max_pairs)
+                    for k in changed:
+                        if k in res:
+                            v = res[k]
+                            mark = "*" if v["p"] <= 0.05 else " "
+                            print(f"    {mark} {g:<12} {k:<24} {v['median']:.3f}x "
+                                  f"({v['wins']}/{v['n']}, p={v['p']:.3f})")
+                            kernel_verdicts.append((g, k, v))
+                sh(["git", "worktree", "remove", "--force", str(tmp / "kb" / "src")], cwd=REPO_ROOT)
+            print(f"[timing]   {a.repeats}-{a.max_pairs} adaptive pairs on the target workload")
+            p = paired_target(base_bin, cand_bin, tmp, a.repeats, a.threads, a.max_pairs)
             for i, r in enumerate(p["ratios"], 1):
                 print(f"    pair {i}: {r:.3f}x")
             print(f"    median {p['median']:.3f}x  ({p['wins']}/{p['n']} pairs favour candidate)"
@@ -616,8 +696,6 @@ def cmd_attempt(a):
     # Under the null each pair is a coin flip, so require a one-sided sign test
     # at p <= 0.05. The old (2n)//3 bar accepted 3/5 -- p=0.50, a coin landing
     # heads three times -- and duly called a 1.016x noise result a record.
-    def sign_p(wins, n):
-        return sum(math.comb(n, i) for i in range(wins, n + 1)) / 2.0**n
     pval = sign_p(p["wins"], p["n"])
     faster = p["median"] > 1.0 and pval <= 0.05
     slower_sig = p["median"] < 1.0 and sign_p(p["n"] - p["wins"], p["n"]) <= 0.05
@@ -625,16 +703,23 @@ def cmd_attempt(a):
               and (qc["IntAbsDiv"] < qb["IntAbsDiv"] or qc["DilMax"] < qb["DilMax"]))
     slower = slower_sig
 
+    kwin = any(v["median"] > 1.0 and v["p"] <= 0.05 for _, _, v in kernel_verdicts)
+    kloss = any(v["median"] < 1.0 and sign_p(v["n"] - v["wins"], v["n"]) <= 0.05
+                for _, _, v in kernel_verdicts)
+
     if a.track == "perf":
-        if not bit_identical:
+        if kloss:
+            verdict, why = "REJECTED", "a changed kernel regressed significantly"
+        elif not bit_identical:
             verdict, why = "REJECTED", "answer moved; a perf record must be bit-identical"
-        elif not faster:
+        elif not (faster or kwin):
             verdict, why = "REJECTED", (f"not resolvably faster: {p['median']:.3f}x, "
                                         f"{p['wins']}/{p['n']} pairs, sign-test p={pval:.3f} "
                                         f"(need p<=0.05)")
         else:
-            verdict, why = "RECORD", (f"{p['median']:.3f}x, {p['wins']}/{p['n']} pairs, "
-                                      f"p={pval:.3f}, answer unchanged")
+            src = "target" if faster else "kernel"
+            verdict, why = "RECORD", (f"{p['median']:.3f}x target ({p['wins']}/{p['n']}, "
+                                      f"p={pval:.3f}); decisive at the {src}; answer unchanged")
     else:  # method
         if bit_identical:
             verdict, why = "REJECTED", "answer did not move; submit this as a perf attempt"
@@ -701,7 +786,12 @@ def main():
     at.add_argument("--threads", type=int, default=None,
                     help="OpenMP threads; use 1 — multi-thread timing is not a signal here")
     at.add_argument("--repeats", type=int, default=9,
-                    help="pairs; the sign test cannot reach p<=0.05 below 5")
+                    help="minimum pairs; the sign test cannot reach p<=0.05 below 5")
+    at.add_argument("--kernel-grids", nargs="*", default=["96x48x24", "144x72x36"],
+                    help="also adjudicate at the kernel on these kbench grids; "
+                         "the record target cannot resolve a single-kernel change")
+    at.add_argument("--max-pairs", type=int, default=25,
+                    help="stop sampling here even if the test has not resolved")
     at.add_argument("--dry-run", action="store_true", help="adjudicate but do not claim the record")
     at.set_defaults(fn=cmd_attempt)
 

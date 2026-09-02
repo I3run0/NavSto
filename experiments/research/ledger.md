@@ -106,3 +106,46 @@ To settle it, on mains power:
 plus a kernel-level paired run at both grids, since this is a single-kernel
 change and the record target dilutes it (see the 2026-09-02 branch-dispatch
 entry, where target and kbench disagreed in sign).
+
+## 2026-09-02 15:18Z — REJECTED (perf)
+- **Attempt:** gauss-seidel diagonal block size 7, re-tuned after cfec776 changed the binary layout
+- **Against:** `HEAD`   **Backend:** serial
+- **Bit-identical:** True
+- **Code changed in:** solvePressurePoisson
+- **Timing:** 1.018x, 5/9 pairs; 19.86 s -> 19.80 s
+- **Quality:** IntAbsDiv 0.7699 -> 0.7699, DilMax 76.50 -> 76.50
+- **Verdict:** not resolvably faster: 1.018x, 5/9 pairs, sign-test p=0.500 (need p<=0.05)
+
+## 2026-09-02 15:32Z — REJECTED (perf)
+- **Attempt:** gauss-seidel diagonal block size 7
+- **Against:** `HEAD`   **Backend:** serial
+- **Bit-identical:** True
+- **Code changed in:** solvePressurePoisson
+- **Timing:** 0.902x, 2/10 pairs; 26.91 s -> 27.08 s
+- **Quality:** IntAbsDiv 0.7699 -> 0.7699, DilMax 76.50 -> 76.50
+- **Verdict:** not resolvably faster: 0.902x, 2/10 pairs, sign-test p=0.989 (need p<=0.05)
+
+## 2026-09-02 15:34Z — note (4ffcf5d)
+REJECTED — Gauss-Seidel diagonal block size 7 (settled).
+
+The lead from the low-battery sweep does not survive proper measurement. With
+adaptive paired sampling:
+  kbench 96x48x24    solvePressurePoisson 0.990x  9/19 pairs  p=0.676
+  kbench 144x72x36   solvePressurePoisson 1.031x  12/18 pairs p=0.119
+  whole-program      0.902x  2/10 pairs  p=0.989 (sampler stopped early: even
+                     winning every remaining pair could not have reached 0.05)
+Bit-identical, as expected -- block size changes the traversal, not the
+arithmetic. GSB stays at 6.
+
+Four earlier fixed-count runs gave 1.027x (8/9), 0.997x (4/9), 1.052x (8/11)
+and 1.052x (7/11) -- every median positive, none significant, and the apparent
+5% from the single-shot sweep was noise throughout. This is what a fixed pair
+count cannot do: it neither confirms nor kills a marginal hypothesis, so the
+same question gets re-litigated. Adaptive sampling closed it in one run by
+spending 18-19 pairs where the answer was in doubt and bailing after 10 where
+it was hopeless.
+
+Also the first exercise of kernel-level adjudication, and it mattered: the
+whole-program target read 0.902x while the kernel read 1.031x at one grid. A
+pressure-solve change is ~20% of the step, so the target cannot see it either
+way.
