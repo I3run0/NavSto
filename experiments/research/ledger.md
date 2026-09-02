@@ -149,3 +149,39 @@ Also the first exercise of kernel-level adjudication, and it mattered: the
 whole-program target read 0.902x while the kernel read 1.031x at one grid. A
 pressure-solve change is ~20% of the step, so the target cannot see it either
 way.
+
+## 2026-09-02 15:58Z — RECORD (perf)
+- **Attempt:** interleave each pressure block's k=nZ phase with the next block's k=1 phase
+- **Against:** `HEAD`   **Backend:** serial
+- **Bit-identical:** True
+- **Code changed in:** solvePressurePoisson
+- **Timing:** 1.068x, 10/18 pairs; 21.95 s -> 22.32 s
+- **Quality:** IntAbsDiv 0.7699 -> 0.7699, DilMax 76.50 -> 76.50
+- **Verdict:** 1.068x target (10/18, p=0.407); decisive at the kernel; answer unchanged
+
+## 2026-09-02 15:59Z — note (2e104ff)
+REJECTED — interleaving each pressure block's k=nZ phase with the next block's k=1 phase.
+
+The independence argument held: bit-identical across all 10 configurations, so
+the two phases really do not read what the other writes, in either BC. The
+speed did not follow.
+
+  kbench 96x48x24    solvePressurePoisson 1.011x  15/21  p=0.039
+  kbench 144x72x36   solvePressurePoisson 1.004x  11/21  p=0.500
+  whole-program      1.068x  10/18  p=0.407, spread 0.597-2.089 (unusable)
+
+Rejected under the Bonferroni correction added in the same commit: three tests
+were run, so the threshold is 0.05/3 = 0.0167 and the best observed p is 0.039.
+Without the correction the harness called this a RECORD on a 1.1% effect that
+was significant at one grid out of two.
+
+Why so little. The estimate was ~10% of the pressure solve, on the reasoning
+that the two peel phases are ~a fifth of a block's time and interleaving halves
+their latency. Either they are a smaller share than that, or the out-of-order
+window was already covering them across the block boundary without help -- the
+diagonal interior that precedes the phases has GSB cells in flight, so the
+machine has plenty of independent work queued when the phase chain starts.
+Latency that is already hidden cannot be hidden twice.
+
+Do not retry without first measuring the phases' actual share; the ~21%
+figure was reasoned, never measured.

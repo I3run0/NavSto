@@ -696,14 +696,25 @@ def cmd_attempt(a):
     # Under the null each pair is a coin flip, so require a one-sided sign test
     # at p <= 0.05. The old (2n)//3 bar accepted 3/5 -- p=0.50, a coin landing
     # heads three times -- and duly called a 1.016x noise result a record.
-    pval = sign_p(p["wins"], p["n"])
-    faster = p["median"] > 1.0 and pval <= 0.05
-    slower_sig = p["median"] < 1.0 and sign_p(p["n"] - p["wins"], p["n"]) <= 0.05
+
     better = (qc["IntAbsDiv"] <= qb["IntAbsDiv"] and qc["DilMax"] <= qb["DilMax"]
               and (qc["IntAbsDiv"] < qb["IntAbsDiv"] or qc["DilMax"] < qb["DilMax"]))
     slower = slower_sig
 
-    kwin = any(v["median"] > 1.0 and v["p"] <= 0.05 for _, _, v in kernel_verdicts)
+    # Multiple comparisons. Every (grid, changed-kernel) pair plus the target is
+    # its own test, and accepting on whichever one clears 0.05 inflates the
+    # family-wise error to about 14% at three tests -- which is how a 1.011x
+    # effect at p=0.039, significant at neither of the other two, once came back
+    # a RECORD. Bonferroni: split the budget across the tests actually run.
+    n_tests = len(kernel_verdicts) + 1
+    alpha = 0.05 / n_tests
+
+    pval = sign_p(p["wins"], p["n"])
+    faster = p["median"] > 1.0 and pval <= alpha
+    slower_sig = p["median"] < 1.0 and sign_p(p["n"] - p["wins"], p["n"]) <= 0.05
+    kwin = any(v["median"] > 1.0 and v["p"] <= alpha for _, _, v in kernel_verdicts)
+    # A regression only has to be credible, not survive the correction: the cost
+    # of missing one is shipping it, so keep that side at the uncorrected 0.05.
     kloss = any(v["median"] < 1.0 and sign_p(v["n"] - v["wins"], v["n"]) <= 0.05
                 for _, _, v in kernel_verdicts)
 
@@ -714,8 +725,11 @@ def cmd_attempt(a):
             verdict, why = "REJECTED", "answer moved; a perf record must be bit-identical"
         elif not (faster or kwin):
             verdict, why = "REJECTED", (f"not resolvably faster: {p['median']:.3f}x, "
-                                        f"{p['wins']}/{p['n']} pairs, sign-test p={pval:.3f} "
-                                        f"(need p<=0.05)")
+                                        f"{p['wins']}/{p['n']} pairs, sign-test p={pval:.3f}; "
+                                        f"best kernel p="
+                                        f"{min([v['p'] for _,_,v in kernel_verdicts], default=1.0):.3f}"
+                                        f" (need p<={alpha:.4f}, Bonferroni over "
+                                        f"{n_tests} tests)")
         else:
             src = "target" if faster else "kernel"
             verdict, why = "RECORD", (f"{p['median']:.3f}x target ({p['wins']}/{p['n']}, "
