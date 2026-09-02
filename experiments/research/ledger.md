@@ -215,3 +215,32 @@ The general (boundary) rows -- 9.6-14.2%, fully serial and untouched -- remain
 the larger unblocked share. Blocking those is legal by the same argument the
 diagonal already rests on (mirror writes are local to their own cell), but this
 result suggests the payoff would be small and grid-dependent.
+
+## 2026-09-02 18:42Z — note (9afe77f)
+REJECTED — fusing the CUDA Z sweep's passes 2 and 3.
+
+The host fused these long ago because both walk k reading velX/velY/velZ at
+km, k and kp -- the same nine loads twice -- and the CUDA port never did. Fused
+here, bit-identical across SolidWall, Periodic and the sponge.
+
+No measurable gain. Under GPU contention (see below) medians were useless, so
+the comparison was made on minima, which are robust to it: best base 10.83 s,
+best candidate 10.84 s, 0.999x.
+
+The likely reason is that the premise does not transfer. On the host those nine
+loads really are re-fetched; on the device the second loop hits L1/L2 because
+the first loop just read the same addresses. Redundant loads that are
+temporally close are not redundant traffic on a cached GPU. Worth remembering
+before porting any other host loop-fusion win to CUDA.
+
+MEASUREMENT HAZARD found while doing this, and it invalidates any GPU timing
+taken in this window: a SECOND Claude session was running navsolver_cuda on the
+same GPU concurrently (session 03787a27..., mine is 5d53409d...). GPU at 86%
+utilisation from the other process. Identical workloads measured 10.7-27.8 s,
+a 2.6x spread, and paired medians swung 1.232x -> 1.001x -> 0.995x across three
+runs of the same comparison. The machine had also come off AC.
+
+Check `ps -eo args | grep navsolver` and nvidia-smi --query-compute-apps before
+trusting a GPU number here. Paired interleaving does not protect against this:
+it corrects for drift that affects both arms equally, and a competing process
+lands on whichever arm happens to be running.
