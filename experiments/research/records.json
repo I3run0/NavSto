@@ -1,7 +1,7 @@
 [
   {
     "date": "2026-09-02 04:04",
-    "commit": "48839bc",
+    "commit": "cfec776",
     "track": "perf",
     "seconds": 35.890004,
     "message": "hoist the loop-invariant /localRe into a Markstein-refined reciprocal",
