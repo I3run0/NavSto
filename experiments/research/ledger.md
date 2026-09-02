@@ -82,3 +82,27 @@ returned 11.2-22.8%, and that is what justified hunting for a legal route
 rather than arguing about the rule. Markstein turned out to give the
 correctly-rounded quotient, so no rule had to move at all. Price a blocked
 idea before debating the gate that blocks it.
+
+## 2026-09-02 — UNVALIDATED LEAD (not a record)
+
+Gauss-Seidel block size may want re-tuning to 7. Single-shot kbench, taken as
+the battery collapsed from 22% to 5%, so this is an observation and NOT a
+measurement — no repeats, no interleaving, no pairing:
+
+  GSB=4  1.209 / 3.199 ms   (96x48x24 / 144x72x36)
+  GSB=5  0.922 / 2.781
+  GSB=6  0.915 / 2.798   <- committed value
+  GSB=7  0.873 / 2.680   <- apparent best, ~5% under 6 at both grids
+  GSB=8  1.010 / 2.988
+
+Reverted to the committed GSB=6 rather than land an unvalidated change. The
+plausible mechanism is that 140a9a9 tuned this before cfec776 changed the
+binary's layout and cache footprint, so the optimum may genuinely have moved --
+which would also mean the tuning is layout-sensitive and needs re-checking after
+any sizeable change to the accel kernels, not just this once.
+
+To settle it, on mains power:
+  python3 scripts/autoresearch.py attempt -m "gauss-seidel block size 7" --repeats 9
+plus a kernel-level paired run at both grids, since this is a single-kernel
+change and the record target dilutes it (see the 2026-09-02 branch-dispatch
+entry, where target and kbench disagreed in sign).
