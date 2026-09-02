@@ -692,31 +692,34 @@ def cmd_attempt(a):
             sh(["git", "worktree", "prune"], cwd=REPO_ROOT)
 
     # ── adjudicate ─────────────────────────────────────────────────────────
-    # A win count is only evidence if it would be unlikely under "no effect".
-    # Under the null each pair is a coin flip, so require a one-sided sign test
-    # at p <= 0.05. The old (2n)//3 bar accepted 3/5 -- p=0.50, a coin landing
-    # heads three times -- and duly called a 1.016x noise result a record.
+    # Persist the raw numbers BEFORE deciding anything. A verdict bug should
+    # cost a rerun of the adjudication, not of the measurement -- an ordering
+    # slip in this block once threw away 25 minutes of completed pairs.
+    raw = {"target": {k: p[k] for k in ("median", "wins", "n", "base_best", "cand_best")},
+           "kernels": [{"grid": g, "kernel": k, **v} for g, k, v in kernel_verdicts],
+           "bit_identical": bit_identical, "changed": changed}
+    (DIR / "last_attempt.json").write_text(json.dumps(raw, indent=2) + "\n")
 
-    better = (qc["IntAbsDiv"] <= qb["IntAbsDiv"] and qc["DilMax"] <= qb["DilMax"]
-              and (qc["IntAbsDiv"] < qb["IntAbsDiv"] or qc["DilMax"] < qb["DilMax"]))
-    slower = slower_sig
-
-    # Multiple comparisons. Every (grid, changed-kernel) pair plus the target is
-    # its own test, and accepting on whichever one clears 0.05 inflates the
-    # family-wise error to about 14% at three tests -- which is how a 1.011x
-    # effect at p=0.039, significant at neither of the other two, once came back
-    # a RECORD. Bonferroni: split the budget across the tests actually run.
+    # Multiple comparisons: every (grid, changed-kernel) pair plus the target is
+    # its own test, and accepting on whichever clears 0.05 inflates the
+    # family-wise error to ~14% at three tests. Bonferroni over the tests run.
     n_tests = len(kernel_verdicts) + 1
     alpha = 0.05 / n_tests
 
+    # A win count is evidence only if it would be unlikely under "no effect":
+    # under the null each pair is a coin flip, hence the one-sided sign test.
     pval = sign_p(p["wins"], p["n"])
     faster = p["median"] > 1.0 and pval <= alpha
-    slower_sig = p["median"] < 1.0 and sign_p(p["n"] - p["wins"], p["n"]) <= 0.05
+    # The rejection side stays at the uncorrected 0.05 on purpose: missing a
+    # regression means shipping it, so that error must not be made harder to
+    # trigger than the acceptance it guards.
+    slower = p["median"] < 1.0 and sign_p(p["n"] - p["wins"], p["n"]) <= 0.05
     kwin = any(v["median"] > 1.0 and v["p"] <= alpha for _, _, v in kernel_verdicts)
-    # A regression only has to be credible, not survive the correction: the cost
-    # of missing one is shipping it, so keep that side at the uncorrected 0.05.
     kloss = any(v["median"] < 1.0 and sign_p(v["n"] - v["wins"], v["n"]) <= 0.05
                 for _, _, v in kernel_verdicts)
+
+    better = (qc["IntAbsDiv"] <= qb["IntAbsDiv"] and qc["DilMax"] <= qb["DilMax"]
+              and (qc["IntAbsDiv"] < qb["IntAbsDiv"] or qc["DilMax"] < qb["DilMax"]))
 
     if a.track == "perf":
         if kloss:

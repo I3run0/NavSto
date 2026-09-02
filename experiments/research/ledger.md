@@ -185,3 +185,33 @@ Latency that is already hidden cannot be hidden twice.
 
 Do not retry without first measuring the phases' actual share; the ~21%
 figure was reasoned, never measured.
+
+## 2026-09-02 16:36Z — note (5ad59fa)
+REJECTED — blocking leftover pressure-row runs at their own run length.
+
+Motivated by a measurement rather than a guess, for once: instrumenting the row
+mix showed 21-25% of rows never get blocked at all --
+  96x48x24    blocked 75.3%  leftover 10.5%  general 14.2%
+  144x72x36   blocked 78.8%  leftover 11.6%  general  9.6%
+The leftovers are runs shorter than GSB=6, which fell back to one row at a
+time -- the fully serial path the blocking exists to avoid.
+
+Blocking them at their actual run length, with a threshold so very short runs
+keep the straight row loop (swept: 2, 3, 4, 5; 4 was best, 5 was noise):
+  kbench 96x48x24    0.977x  3/13 for the candidate, i.e. 10/13 against, p=0.046
+  kbench 144x72x36   1.031x  7/9   p=0.090
+Bit-identical across all 10 configurations. Rejected: a changed kernel
+regressed significantly at one grid, and the other grid did not reach
+significance.
+
+Why it fails. The leftover blocks use a plain steady loop, not the unrolled one
+the full-block path gets, because B is a runtime value there. Diagonal
+traversal costs loop overhead per diagonal and buys ILP; at B=4-5 over 22
+interior cells the overhead wins. A templated instantiation per B would keep
+the unrolling and might flip it, but the measured upside is 1.031x at one grid
+and negative at the other, so it is not worth the code.
+
+The general (boundary) rows -- 9.6-14.2%, fully serial and untouched -- remain
+the larger unblocked share. Blocking those is legal by the same argument the
+diagonal already rests on (mirror writes are local to their own cell), but this
+result suggests the payoff would be small and grid-dependent.
