@@ -89,7 +89,7 @@ cannot be broken in lexicographic order — but block B's k=nZ phase and block
 B+1's k=1 phase are mutually independent and could run interleaved for two
 chains. Worth ~4-5% of the whole program. Superseded if item 1 lands.
 
-## 7. Row-level branch dispatch in the operand pass
+## 7. Row-level branch dispatch in the operand pass — CLOSED, do not retry
 
 The scalar operand pass is 21-26% of computeAccelerations while `exp` alone is
 <=7% — most of it is branching and stores. When every cell in a row takes the
@@ -97,6 +97,31 @@ same branch of `computeExponentialWeights` the whole row could go through a
 vectorised path. At Re=10000 all cells take `DPe > 200` and never call `exp`.
 Buys nothing at Re=100, which is what the reward and roofline workloads run,
 so its value depends on which Re production actually cares about.
+
+**Tried and rejected (see the ledger).** Whole-program 1.014x at p=0.090;
+kbench 0.962x (1/9) at 96x48x24 and 0.909x (0/9) at 144x72x36; 0.872x with the
+classification fused into the DPe pass to make it free. The 23% is the work
+INSIDE the branches -- five or six operand-row stores per cell -- not the
+branching, so removing the tests recovers almost nothing, while the
+classification costs on every row that turns out to be Mixed. Rows near a wall
+have DPe -> 0 and fall into the polynomial branch, so Mixed is common.
+
+## Landed since this list was written
+
+- **Refined-reciprocal for the invariant divisor** (`cfec776`): localRe is
+  constant across a k-row, so twelve per-cell divisions became one reciprocal
+  plus two FMAs each, via Markstein's refinement -- which yields the
+  *correctly-rounded* quotient, so it is bit-identical rather than relaxed.
+  1.148x / 1.114x on computeAccelerations, 9/9 pairs at both grids; 1.029x
+  whole-program at p=0.002. Shared through KernelRows.hpp, so OpenMP got it
+  too. Priced first as a diagnostic at 11.2-22.8%, against an operation-count
+  estimate of ~6% -- the estimate was wrong by 2-4x, which is the argument for
+  pricing a blocked idea before arguing about the rule that blocks it.
+
+  **No invariant divisions remain** in computeAccelerations: the 29 left are
+  per-cell `num/den` and computeQsi's `/DPe`, neither of which can hoist. The
+  same trick found no other candidate site in the other kernels -- their
+  invariant reciprocals were already hoisted.
 
 ## Closed / do not retry
 
@@ -108,4 +133,12 @@ so its value depends on which Re production actually cares about.
   cost more than the vectorisation returned on an 11-iteration row. Fuse
   instead of adding passes.
 - **Reducing the division count**: fixed by the scheme. Would change the
-  arithmetic, which the gate forbids.
+  arithmetic, which the gate forbids. Note this is about the *count*; the
+  invariant ones were made cheap without changing any result -- see above.
+- **Lengthening the row kernels' vector loops (j-batching)**: a controlled test
+  on a fixed grid -- splitting one row-kernel call into two halves, so caches
+  and strides are untouched -- put the whole trip-count effect at ~6% for that
+  kernel. Full j-batching would recover maybe 3% of computeAccelerations for a
+  large restructuring. The 19% that shape changes produce is therefore mostly
+  cache and stride, not loop length. If anything is worth chasing there it is
+  the access pattern, not the trip count.

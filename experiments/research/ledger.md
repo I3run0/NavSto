@@ -61,3 +61,24 @@ hypothesis must be adjudicated at the kernel, not only on the record target.
 - **Timing:** 1.029x, 9/9 pairs; 37.58 s -> 35.89 s
 - **Quality:** IntAbsDiv 0.7699 -> 0.7699, DilMax 76.50 -> 76.50
 - **Verdict:** 1.029x, 9/9 pairs, p=0.002, answer unchanged
+
+## 2026-09-02 04:06Z — note (2013d4d)
+RECORD — refined-reciprocal for the invariant divisor (cfec776).
+
+Kernel-level, paired and interleaved, 9 pairs each:
+  96x48x24    computeAccelerations 1.148x  9/9 (min 1.135)
+  144x72x36   computeAccelerations 1.114x  9/9 (min 1.066)
+Whole-program target 1.029x, 9/9, p=0.002 -- lower because the kernel is 61%
+of the step and the machine was throttling hard (the same record-holder binary
+measured 27.2 s earlier in the session and 37.6 s during this attempt).
+
+Bit-identical across all 10 configurations including the multigrid path.
+solvePressurePoisson is a control and reads 1.001x / 1.015x, as it should.
+
+Method note worth keeping: the idea was on the backlog as BLOCKED by the
+accuracy gate, with an operation-count estimate of ~6%. Pricing it as a
+diagnostic first -- build the illegal version, measure it, throw it away --
+returned 11.2-22.8%, and that is what justified hunting for a legal route
+rather than arguing about the rule. Markstein turned out to give the
+correctly-rounded quotient, so no rule had to move at all. Price a blocked
+idea before debating the gate that blocks it.
