@@ -42,7 +42,7 @@ will produce wrong verdicts if you do not control for them:
     one thread; threading speedup is a whole-program question, not a kernel one.
 """
 
-import argparse, datetime as dt, json, os, re, shutil, statistics, subprocess, sys, tempfile
+import argparse, datetime as dt, json, math, os, re, shutil, statistics, subprocess, sys, tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -461,7 +461,8 @@ def cmd_characterize(a):
     say("ns per active cell as the working set grows past the caches. A "
         "bandwidth-bound kernel falls off a cliff; a latency- or "
         "throughput-bound one barely moves.\n")
-    say("| grid | 6 fields | " + " | ".join(sorted(prof)[:3]) + " |")
+    top3 = [k for k, _ in sorted(prof.items(), key=lambda kv: -kv[1]["share_percent"])][:3]
+    say("| grid | 6 fields | " + " | ".join(top3) + " |")
     say("|---|---|" + "---|" * 3)
     for g in ["48x24x12", "96x48x24", "144x72x36", "192x96x48"]:
         gx, gy, gz = (int(x) for x in g.split("x"))
@@ -471,7 +472,7 @@ def cmd_characterize(a):
                env={**os.environ, **BENCH_ENV})
         cells = re.search(r'"active_cells":\s*(\d+)', r.stdout)
         vals = []
-        for k in sorted(prof)[:3]:
+        for k in top3:
             m = re.search(rf'"kernel": "{k}".*?"ns_per_active_cell":\s*([0-9.]+)', r.stdout)
             vals.append(f"{float(m.group(1)):.1f}" if m else "—")
         say(f"| {g} | {ws:.0f} MB | " + " | ".join(vals) + " |")
@@ -611,18 +612,29 @@ def cmd_attempt(a):
             sh(["git", "worktree", "prune"], cwd=REPO_ROOT)
 
     # ── adjudicate ─────────────────────────────────────────────────────────
-    faster = p["median"] > 1.0 and p["wins"] >= (2 * p["n"]) // 3
+    # A win count is only evidence if it would be unlikely under "no effect".
+    # Under the null each pair is a coin flip, so require a one-sided sign test
+    # at p <= 0.05. The old (2n)//3 bar accepted 3/5 -- p=0.50, a coin landing
+    # heads three times -- and duly called a 1.016x noise result a record.
+    def sign_p(wins, n):
+        return sum(math.comb(n, i) for i in range(wins, n + 1)) / 2.0**n
+    pval = sign_p(p["wins"], p["n"])
+    faster = p["median"] > 1.0 and pval <= 0.05
+    slower_sig = p["median"] < 1.0 and sign_p(p["n"] - p["wins"], p["n"]) <= 0.05
     better = (qc["IntAbsDiv"] <= qb["IntAbsDiv"] and qc["DilMax"] <= qb["DilMax"]
               and (qc["IntAbsDiv"] < qb["IntAbsDiv"] or qc["DilMax"] < qb["DilMax"]))
-    slower = p["median"] < 1.0 and p["wins"] <= p["n"] // 3
+    slower = slower_sig
 
     if a.track == "perf":
         if not bit_identical:
             verdict, why = "REJECTED", "answer moved; a perf record must be bit-identical"
         elif not faster:
-            verdict, why = "REJECTED", f"not resolvably faster ({p['median']:.3f}x, {p['wins']}/{p['n']})"
+            verdict, why = "REJECTED", (f"not resolvably faster: {p['median']:.3f}x, "
+                                        f"{p['wins']}/{p['n']} pairs, sign-test p={pval:.3f} "
+                                        f"(need p<=0.05)")
         else:
-            verdict, why = "RECORD", f"{p['median']:.3f}x ({p['wins']}/{p['n']} pairs), answer unchanged"
+            verdict, why = "RECORD", (f"{p['median']:.3f}x, {p['wins']}/{p['n']} pairs, "
+                                      f"p={pval:.3f}, answer unchanged")
     else:  # method
         if bit_identical:
             verdict, why = "REJECTED", "answer did not move; submit this as a perf attempt"
@@ -688,7 +700,8 @@ def main():
     at.add_argument("--backend", default="serial", choices=("serial", "openmp"))
     at.add_argument("--threads", type=int, default=None,
                     help="OpenMP threads; use 1 — multi-thread timing is not a signal here")
-    at.add_argument("--repeats", type=int, default=7)
+    at.add_argument("--repeats", type=int, default=9,
+                    help="pairs; the sign test cannot reach p<=0.05 below 5")
     at.add_argument("--dry-run", action="store_true", help="adjudicate but do not claim the record")
     at.set_defaults(fn=cmd_attempt)
 
