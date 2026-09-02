@@ -89,7 +89,61 @@ put *both halves* above 1.0x — arithmetically impossible if the whole is below
 a separate, whole-program question. If you cannot resolve it, say so rather
 than reporting a number.
 
-## 2. Attribution — find the real constraint before optimizing
+## 2. Characterize before optimizing — this is phase 0, not optional
+
+**Never pick a hypothesis before running `characterize`.** Every large win in
+this project came from characterization overturning a belief, not from having a
+good idea: the roofline implied the transcendental and the answer was
+divisions; the documentation said memory-bound and a working-set sweep said no.
+Optimizing without a current characterization is guessing with extra steps.
+
+```bash
+python3 scripts/autoresearch.py characterize          # all probes
+python3 scripts/autoresearch.py characterize --probe divisions gs-recurrence
+```
+
+It writes `experiments/research/profile.md` with four things:
+
+1. **The workload.** Grid, active vs ghosted cells, working-set size against
+   this machine's L2/L3, and therefore the **regime**. This matters more than
+   it looks: `kbench`'s grids are cache-resident and the production grid is
+   not, so a win measured in one regime need not transfer. Check the regime
+   line before believing a result generalises.
+2. **Attribution.** Per-kernel share of step time.
+3. **A working-set sweep.** ns per active cell as the set grows past the caches.
+   A bandwidth-bound kernel falls off a cliff there; a latency- or
+   throughput-bound one barely moves.
+4. **Causal probes.** What speeding each construct up would actually be worth.
+
+### Probe validity — the part that bites
+
+A probe is a same-shape stand-in built from the same commit, and it is only
+meaningful if it is **on the hot path**. Matching the source text does not
+establish that. A probe pointed at `computeExponentialWeights` — a function the
+division work had moved off the host hot path, but which still existed and
+still matched — compiled cleanly, reported 15.1% at Re=10000, and was measuring
+pure noise. The physically impossible part gave it away: at Re=10000 `DPe` is
+around 625, the `|DPe| > 200` branch returns without calling `exp` at all, so
+the true share is ~0.
+
+So every probe is checked for **inertness**: run the real and stand-in binaries
+on one configuration and compare output. Deliberately wrong arithmetic that
+changes *no output* is not on the hot path, and the probe reports INERT rather
+than a number. Probes also report STALE when their source text no longer
+matches. Treat either as a bug in the probe registry to fix before ranking
+anything against it.
+
+Two further cautions:
+
+- **Report the spread.** The same probe measured 8.7% and 0.2% on consecutive
+  runs. A share quoted without a range invites ranking a backlog against noise.
+- **Shares do not sum.** Removing one division lets the others' latency
+  overlap, so each measured alone looks larger than its marginal contribution.
+  A probe share is an upper bound on what removing that construct buys — and
+  removing it is usually not legal. The value is knowing what to restructure
+  *around*.
+
+## 3. Attribution instruments — find the real constraint before optimizing
 
 Do not guess. Four instruments, cheapest first.
 
@@ -161,15 +215,16 @@ Ousterhout's *"Always Measure One Level Deeper"* (CACM 2018) is the general
 form of all four: the top-line number tells you nothing about mechanism, and
 mechanism is what you optimize.
 
-## 3. The loop
+## 4. The loop
 
 ```
-next → pick one hypothesis → state the mechanism → implement →
+characterize → next → pick one hypothesis → state the mechanism → implement →
   attempt ─┬─ RECORD  → commit alone, re-point the record, update the backlog
            └─ REJECT  → revert the tree, log the number and why, close or refine
 ```
 
 ```bash
+python3 scripts/autoresearch.py characterize   # phase 0 — where the time is and why
 python3 scripts/autoresearch.py status        # the record and the target it stands against
 python3 scripts/autoresearch.py next          # ranked idea queue
 python3 scripts/autoresearch.py attempt -m "one line: what changed"
@@ -192,7 +247,7 @@ The degenerate-`nz` cases are in the matrix because the periodic-wrap peels
 special-case them, and that is exactly the class of edge case hand-testing
 skips.
 
-## 4. Two tracks
+## 5. Two tracks
 
 | track | accuracy rule | wins by |
 |---|---|---|
@@ -213,7 +268,7 @@ sides with `-ffp-contract=off` and compare byte for byte. Anything surviving
 that is a real change in the arithmetic. When output legitimately moves, every
 backend the validators cross-check must move with it in the same commit.
 
-## 5. Adjudication
+## 6. Adjudication
 
 Accept a **perf** record only when all hold:
 
@@ -233,7 +288,7 @@ at no worse cost.
 that, say it is unresolvable rather than reporting a number. A change that is
 consistent (9/9 pairs) but inside a kernel's layout band is *not* a result.
 
-## 6. What to record
+## 7. What to record
 
 Every attempt, in `experiments/research/ledger.md` — the failures especially.
 A rejected idea nobody wrote down gets retried.
@@ -259,7 +314,7 @@ Commit messages follow the same discipline: `perf(<area>): what changed — the
 measured number`, then the mechanism, the paired numbers, and explicitly where
 the theory was wrong.
 
-## 7. Choosing what to try next
+## 8. Choosing what to try next
 
 `experiments/research/backlog.md` ranks by expected value, and every entry names
 the measurement motivating it so a stale one can be re-checked rather than
@@ -278,7 +333,7 @@ any single fixed strategy. Here the space is small and the hypotheses are
 mechanistic, so a ranked queue beats a search; revisit that if parameter tuning
 (block sizes, sweep counts) starts to dominate.
 
-## 8. Do not
+## 9. Do not
 
 - Adjudicate against a stored baseline, or compare two numbers from different
   measurement windows.
@@ -293,3 +348,5 @@ mechanistic, so a ranked queue beats a search; revisit that if parameter tuning
   into a win and a regression.
 - Quote a hardware ceiling from a spec sheet, or trust a microbenchmark you
   have not swept for configuration.
+- Pick a hypothesis without a current `characterize` run, or rank a backlog
+  against a probe that reported STALE or INERT.

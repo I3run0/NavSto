@@ -279,7 +279,242 @@ def accuracy(base_bin, cand_bin, tmp, threads=None, skip_csv=False):
     return res
 
 
+# ── Characterization ───────────────────────────────────────────────────────
+#
+# Before optimizing anything: what is this workload, and what is it waiting on?
+# Every large win this session came from characterization overturning a belief,
+# not from a good idea -- the roofline implied the transcendental and the answer
+# was divisions; the docs said memory-bound and the working-set sweep said no.
+#
+# A PROBE is a same-shape stand-in: one construct replaced by something of the
+# same operation count whose results are deliberately wrong, built from the same
+# commit and timed interleaved against the real binary. The delta is that
+# construct's share. This is causal profiling by hand (Coz, SOSP 2015): it
+# answers "what would speeding this up be worth", which is not what a sampling
+# profiler tells you.
+#
+# Probes rot as the code changes. A probe whose source text no longer matches is
+# reported STALE rather than silently skipped -- a characterization missing a
+# probe is a characterization you cannot rank a backlog against.
+
+PROBES = [
+    dict(name="exp", kernel="computeAccelerations",
+         asks="cost of the transcendental in the weight evaluation",
+         file="src/solver/SchemeMath.hpp",
+         # expWeightOperands, not computeExponentialWeights: the division work
+         # moved the host backends onto the operand form, and the old function
+         # still exists but is cold. Patching it matched, compiled, and measured
+         # noise -- which is why every probe is now checked for inertness below.
+         subs=[("num = DPe;  den = exp(DPe) - T(1);",
+                "num = DPe;  den = (T(1)+DPe*(T(1)+DPe*T(0.5))) - T(1);")]),
+    dict(name="divisions", kernel="computeAccelerations",
+         asks="cost of every double division on the path",
+         file="src/solver/KernelRows.hpp",
+         subs=[("num[t] / den[t]", "num[t] * den[t]"),
+               ("numF[t] / denF[t]", "numF[t] * denF[t]"),
+               ("numC[t] / denC[t]", "numC[t] * denC[t]"),
+               ("pip / localRe", "pip * localRe"),
+               ("pim / localRe", "pim * localRe"),
+               ("pipF / localRe", "pipF * localRe"),
+               ("pimF / localRe", "pimF * localRe"),
+               ("pipC / localRe", "pipC * localRe"),
+               ("pimC / localRe", "pimC * localRe")]),
+    dict(name="branch-chain", kernel="computeAccelerations",
+         asks="cost of the four-way branch selection, exp included",
+         file="src/solver/SchemeMath.hpp",
+         subs=[("""    if (fabs(DPe) < T(0.1)) {
+        num = T(1);
+        den = (((T(0.05)*DPe + T(0.25))*DPe + T(1))*DPe/T(6) + T(0.5))*DPe + T(1);
+    } else if (fabs(DPe) <= T(200)) {
+        num = DPe;  den = exp(DPe) - T(1);
+    } else if (DPe > T(200)) {
+        num = T(0); den = T(1);
+    } else {
+        num = -DPe; den = T(1);
+    }""", "    num = DPe; den = DPe + T(1);")]),
+    dict(name="gs-recurrence", kernel="solvePressurePoisson",
+         asks="cost of the Gauss-Seidel dependent chain in k",
+         file="src/backends/serial/Physics.cpp",
+         subs=[("+ cZ*(s.press(i,j,kp) + s.press(i,j,km))",
+                "+ cZ*(s.press(i,j,kp) + s.press(i,j,kp))")]),
+]
+
+
+def _kbench_ms(binary, kernel, grid, re_, iters=20):
+    r = sh([str(binary), "--grid", grid, "--iters", str(iters), "--re", str(re_),
+            "--kernel", kernel], env={**os.environ, **BENCH_ENV})
+    m = re.search(r'"min_ms":\s*([0-9.]+)', r.stdout)
+    if not m:
+        raise SystemExit(f"kbench gave no timing for {kernel}:\n{r.stdout[-800:]}\n{r.stderr[-800:]}")
+    return float(m.group(1))
+
+
+def run_probe(probe, tmp, grid, res, repeats=2):
+    """Build the stand-in from HEAD, time it interleaved against the real build."""
+    d = tmp / f"probe_{probe['name']}"
+    wt = d / "src"
+    sh(["git", "worktree", "add", "-f", "--detach", str(wt), "HEAD"], cwd=REPO_ROOT)
+    try:
+        f = wt / probe["file"]
+        txt = f.read_text()
+        for a, b in probe["subs"]:
+            if txt.count(a) < 1:
+                return {"stale": True, "missing": a[:60]}
+            txt = txt.replace(a, b)
+        f.write_text(txt)
+        bld = wt / "build"
+        sh(["cmake", "-S", str(wt), "-B", str(bld), "-DCMAKE_BUILD_TYPE=Release"])
+        if sh(["cmake", "--build", str(bld), "-j", "--target",
+               "navsolver_kbench", "navsolver"]).returncode:
+            return {"stale": True, "missing": "stand-in did not compile"}
+
+        # Is the stand-in actually on the hot path? A probe whose deliberately
+        # wrong arithmetic changes NO output is patching dead code, and its
+        # timing delta is noise. Matching the source text is not enough to know
+        # that -- an obsolete overload can still match and still be cold.
+        outs = {}
+        for tag, exe in (("real", REPO_ROOT / "build" / "navsolver"), ("stub", bld / "navsolver")):
+            o = d / f"inert_{tag}"
+            o.mkdir(parents=True, exist_ok=True)
+            (o / "p.cfg").write_text(f"outputDir = {o}\nrunName = t\n" + CASES["perRK4"])
+            sh([str(exe), str(o / "p.cfg")], env={**os.environ, **BENCH_ENV})
+            outs[tag] = sorted((f.name, f.read_bytes()) for f in o.glob("t_t*.vtk"))
+        if outs["real"] and outs["real"] == outs["stub"]:
+            return {"stale": True, "missing": "INERT — stand-in changed no output, "
+                                              "so it is not on the hot path"}
+        out = {}
+        for r_ in res:
+            shares = []
+            for _ in range(repeats):
+                real = _kbench_ms(REPO_ROOT / "build" / "navsolver_kbench", probe["kernel"], grid, r_)
+                stub = _kbench_ms(bld / "navsolver_kbench", probe["kernel"], grid, r_)
+                shares.append((1.0 - stub / real) * 100.0)
+            # Report the range, not a point: the same probe measured 8.7% and
+            # 0.2% on consecutive runs. A probe share with no spread beside it
+            # invites ranking a backlog against noise.
+            out[r_] = (max(shares), min(shares))
+        return {"stale": False, "shares": out}
+    finally:
+        sh(["git", "worktree", "remove", "--force", str(wt)], cwd=REPO_ROOT)
+        sh(["git", "worktree", "prune"], cwd=REPO_ROOT)
+
+
+def cache_bytes():
+    r = sh(["lscpu"])
+    out = {}
+    for line in r.stdout.split("\n"):
+        m = re.match(r"\s*(L[123][di]?) cache:\s+([\d.]+)\s*(KiB|MiB)", line)
+        if m:
+            out[m.group(1)] = float(m.group(2)) * (1024 if m.group(3) == "KiB" else 1024**2)
+    return out
+
+
 # ── commands ───────────────────────────────────────────────────────────────
+
+def cmd_characterize(a):
+    """Where is the time, and what is it waiting on? Run before picking a hypothesis."""
+    DIR.mkdir(parents=True, exist_ok=True)
+    from harness import profile_kernels           # local: builds a profiling tree
+    lines, say = [], lambda s: (print(s), lines.append(s))
+
+    say(f"# Characterization — {git_short()} on {cpu_model()}")
+    say(f"_{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M')}Z_\n")
+
+    # ── 1. the workload itself ────────────────────────────────────────────
+    say("## Workload")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "c.cfg").write_text(f"outputDir = {d}\nrunName = t\n" + TARGET_CFG)
+        r = sh([str(REPO_ROOT / "build" / "navsolver"), str(d / "c.cfg")])
+        m = re.search(r"Active cells:\s*(\d+)", r.stdout)
+        active = int(m.group(1)) if m else 0
+    nx, ny, nz = TARGET["grid"]
+    ghost = (nx + 2) * (ny + 2) * (nz + 2)
+    caches = cache_bytes()
+    l3 = caches.get("L3", 0)
+    say(f"- grid {nx}x{ny}x{nz}; {active:,} active of {ghost:,} ghosted cells "
+        f"({active/ghost*100:.1f}%)")
+    ws = ghost * 8 * 6            # velocity xyz + acceleration xyz, the live set
+    say(f"- one fp64 field {ghost*8/1e6:.1f} MB; six-field working set "
+        f"{ws/1e6:.1f} MB; L2 {caches.get('L2',0)/1e6:.1f} MB, L3 {l3/1e6:.1f} MB")
+    regime = ("STREAMING (the working set exceeds L3)" if ws > l3
+              else "CACHE-RESIDENT (the working set fits in L3)")
+    say(f"- regime: **{regime}** — a win measured in one regime need not transfer to the other")
+    say(f"- RK4Transient: 5 computeAccelerations and 4 solvePressurePoisson per step, "
+        f"each pressure call doing {TARGET['pressure_iter']} sweeps\n")
+
+    # ── 2. where the time goes ────────────────────────────────────────────
+    say("## Attribution")
+    # Fewer steps than the record target: a profiling build changes codegen and
+    # is slower, and only the per-kernel SHARES are usable from it anyway.
+    prof = profile_kernels(TARGET_CFG.replace("maxTimeSteps = 400", "maxTimeSteps = 60")
+                           + "outputDir = {out}\nrunName = charz\n", run_name="charz")
+    say("| kernel | share | ms/call |")
+    say("|---|---|---|")
+    for k, v in sorted(prof.items(), key=lambda kv: -kv[1]["share_percent"]):
+        say(f"| {k} | {v['share_percent']:.1f}% | {v['mean_ms']:.3f} |")
+    top = max(prof.items(), key=lambda kv: kv[1]["share_percent"])[0]
+    say("")
+
+    # ── 3. is it bandwidth-bound? ─────────────────────────────────────────
+    say("## Working-set sweep — bandwidth-bound or not")
+    say("ns per active cell as the working set grows past the caches. A "
+        "bandwidth-bound kernel falls off a cliff; a latency- or "
+        "throughput-bound one barely moves.\n")
+    say("| grid | 6 fields | " + " | ".join(sorted(prof)[:3]) + " |")
+    say("|---|---|" + "---|" * 3)
+    for g in ["48x24x12", "96x48x24", "144x72x36", "192x96x48"]:
+        gx, gy, gz = (int(x) for x in g.split("x"))
+        ws = (gx+2)*(gy+2)*(gz+2)*8*6/1e6
+        r = sh([str(REPO_ROOT / "build" / "navsolver_kbench"), "--grid", g,
+                "--iters", "20", "--re", str(TARGET["re"])],
+               env={**os.environ, **BENCH_ENV})
+        cells = re.search(r'"active_cells":\s*(\d+)', r.stdout)
+        vals = []
+        for k in sorted(prof)[:3]:
+            m = re.search(rf'"kernel": "{k}".*?"ns_per_active_cell":\s*([0-9.]+)', r.stdout)
+            vals.append(f"{float(m.group(1)):.1f}" if m else "—")
+        say(f"| {g} | {ws:.0f} MB | " + " | ".join(vals) + " |")
+    say("")
+
+    # ── 4. causal probes ──────────────────────────────────────────────────
+    say("## Probes — what would speeding each construct up be worth")
+    say("Same-shape stand-ins, deliberately wrong results, timed interleaved "
+        "against the real build. Run at both Reynolds numbers the project uses: "
+        "they take different branches.\n")
+    say("| construct | kernel | Re=10000 | Re=100 | asks |")
+    say("|---|---|---|---|---|")
+    with tempfile.TemporaryDirectory() as td:
+        for pr in PROBES:
+            if a.probe and pr["name"] not in a.probe:
+                continue
+            res = run_probe(pr, Path(td), a.grid, [10000, 100], a.repeats)
+            if res["stale"]:
+                say(f"| {pr['name']} | {pr['kernel']} | STALE | STALE | "
+                    f"probe no longer matches: `{res['missing']}` |")
+            else:
+                s = res["shares"]
+                def fmt(v):
+                    hi, lo = v
+                    return f"{hi:.1f}%" if abs(hi - lo) < 1.0 else f"{lo:.1f}-{hi:.1f}%"
+                say(f"| {pr['name']} | {pr['kernel']} | {fmt(s[10000])} | "
+                    f"{fmt(s[100])} | {pr['asks']} |")
+    say("")
+
+    say("## Reading this")
+    say(f"- The dominant kernel is **{top}**. Rank the backlog against the probe "
+        f"shares above, not against intuition.")
+    say("- A probe share is an upper bound on what removing that construct buys, "
+        "and removing it is usually not legal — the value is knowing which "
+        "constructs are worth restructuring *around*.")
+    say("- Probe shares do not sum: removing one division lets the others' "
+        "latency overlap, so each measured alone looks larger than its marginal share.")
+
+    out = DIR / "profile.md"
+    out.write_text("\n".join(lines) + "\n")
+    print(f"\n[written] {out.relative_to(REPO_ROOT)}")
+    return 0
+
 
 def cmd_status(a):
     recs = load_records()
@@ -434,6 +669,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     s = ap.add_subparsers(dest="cmd", required=True)
+    ch = s.add_parser("characterize", help="where the time is and what it waits on")
+    ch.add_argument("--grid", default="96x48x24")
+    ch.add_argument("--probe", nargs="*", default=None, help="only these probes")
+    ch.add_argument("--repeats", type=int, default=3)
+    ch.set_defaults(fn=cmd_characterize)
     s.add_parser("status").set_defaults(fn=cmd_status)
     s.add_parser("leaderboard").set_defaults(fn=cmd_leaderboard)
     s.add_parser("next").set_defaults(fn=cmd_next)
