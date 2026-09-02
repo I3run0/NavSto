@@ -609,39 +609,59 @@ void buildPressureSourceCuda(DeviceState& d, Real timeStepSize) {
 //  repeated runs plus compute-sanitizer racecheck) before shipping.
 // ═════════════════════════════════════════════════════════════════════════
 
+// Ghost mirroring, one write per thread instead of one j-scan per thread.
+//
+// These used to run a thread per (i,k) that walked the whole j range and wrote
+// only where a boundary test fired -- O(nx*ny*nz) iterations to perform
+// O(ny*nz + nx*nz + nx*ny) writes. At 180x60x30 that is ~324k iterations for a
+// few thousand stores, and it measured 6.9% of the CUDA run (probe: keep the
+// launches, empty the bodies). The mapping is simply inverted so each thread
+// lands directly on the cells it writes.
+//
+// Same stores, same values, so the pressure field is bit-identical. Every
+// destination is written by exactly one thread, as before.
+
+// The i-direction ghosts: a thread per (j,k) writes its row's two ends
+// directly, rather than every column testing whether it is one of them.
 __global__ void mirrorGhostCellsCrossRowKernel(DeviceState d) {
-    // One thread per (i, k), not per i: the k loop was pure serial work inside
-    // each thread, and numCellsX threads leaves this GPU almost idle.
     const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    if (tid >= (long long)d.numCellsX * d.numCellsZ) return;
-    const int i = 1 + (int)(tid / d.numCellsZ);
+    if (tid >= (long long)d.numCellsY * d.numCellsZ) return;
+    const int j = 1 + (int)(tid / d.numCellsZ);
     const int k = 1 + (int)(tid % d.numCellsZ);
-    const int im = i - 1, ip = i + 1;
-    int jLoopS, jLoopN; mirrorJRange(d, i, jLoopS, jLoopN);
-    {
-        for (int j = jLoopS; j <= jLoopN; ++j) {
-            if (i == 1 || i == d.iLow[j] + 1)            PRES(d, im, j, k) = PRES(d, i, j, k);
-            if (i == d.numCellsX || i == d.iHigh[j])     PRES(d, ip, j, k) = PRES(d, i, j, k);
-        }
-    }
+
+    // A column i mirrors into row j only if j lies in that column's own
+    // mirror range -- the condition the j-scan applied implicitly.
+    auto inRange = [&](int i) {
+        if (i < 1 || i > d.numCellsX) return false;
+        int s_, n_; mirrorJRange(d, i, s_, n_);
+        return j >= s_ && j <= n_;
+    };
+    if (inRange(1))                       PRES(d, 0, j, k) = PRES(d, 1, j, k);
+    const int iL = d.iLow[j] + 1;
+    if (iL != 1 && inRange(iL))           PRES(d, iL - 1, j, k) = PRES(d, iL, j, k);
+
+    if (inRange(d.numCellsX))             PRES(d, d.numCellsX + 1, j, k) = PRES(d, d.numCellsX, j, k);
+    const int iH = d.iHigh[j];
+    if (iH != d.numCellsX && inRange(iH)) PRES(d, iH + 1, j, k) = PRES(d, iH, j, k);
 }
 
+// The j-direction ghosts (two per (i,k), no scan needed) and, for the two
+// k-planes that have them, the z-direction ghosts. Only 2 of numCellsZ threads
+// take the j loop, so it costs nothing on the rest.
 __global__ void mirrorGhostCellsSameRowKernel(DeviceState d) {
-    // One thread per (i, k); see the cross-row kernel above.
     const long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     if (tid >= (long long)d.numCellsX * d.numCellsZ) return;
     const int i = 1 + (int)(tid / d.numCellsZ);
     const int k = 1 + (int)(tid % d.numCellsZ);
     int jLoopS, jLoopN; mirrorJRange(d, i, jLoopS, jLoopN);
-    {
-        for (int j = jLoopS; j <= jLoopN; ++j) {
-            if (j == jLoopS)                              PRES(d, i, j - 1, k) = PRES(d, i, j, k);
-            if (j == jLoopN)                              PRES(d, i, j + 1, k) = PRES(d, i, j, k);
-            if (d.solidWall) {
-                if (k == 1)             PRES(d, i, j, k - 1) = PRES(d, i, j, k);
-                if (k == d.numCellsZ)   PRES(d, i, j, k + 1) = PRES(d, i, j, k);
-            }
-        }
+    if (jLoopS > jLoopN) return;
+
+    PRES(d, i, jLoopS - 1, k) = PRES(d, i, jLoopS, k);
+    PRES(d, i, jLoopN + 1, k) = PRES(d, i, jLoopN, k);
+
+    if (d.solidWall && (k == 1 || k == d.numCellsZ)) {
+        const int kg = (k == 1) ? k - 1 : k + 1;
+        for (int j = jLoopS; j <= jLoopN; ++j) PRES(d, i, j, kg) = PRES(d, i, j, k);
     }
 }
 
@@ -682,10 +702,10 @@ void solvePressurePoissonCuda(DeviceState& d) {
     CUDA_CHECK(cudaMemcpy(&pRef, d.press + d.idx(d.iRef, d.jRef, d.kRef), sizeof(Real), cudaMemcpyDeviceToHost));
 
     for (int sweep = 0; sweep < d.numPressureIter; ++sweep) {
-        mirrorGhostCellsCrossRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsCrossRowKernel<<<gridFor((long long)d.numCellsY * d.numCellsZ), CUDA_BLOCK>>>(d);
         mirrorGhostCellsSameRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
         updateColorKernel<<<gridFor(d.nRed), CUDA_BLOCK>>>(d, d.redCells, d.nRed, cX, cY, cZ, invDiag, pRef);
-        mirrorGhostCellsCrossRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
+        mirrorGhostCellsCrossRowKernel<<<gridFor((long long)d.numCellsY * d.numCellsZ), CUDA_BLOCK>>>(d);
         mirrorGhostCellsSameRowKernel<<<gridFor((long long)d.numCellsX * d.numCellsZ), CUDA_BLOCK>>>(d);
         updateColorKernel<<<gridFor(d.nBlack), CUDA_BLOCK>>>(d, d.blackCells, d.nBlack, cX, cY, cZ, invDiag, pRef);
     }
